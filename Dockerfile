@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && \
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 
-FROM ghcr.io/typst/typst:0.14.2 AS typst
+FROM ghcr.io/typst/typst:0.15.1 AS typst
 
 FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update && \
