@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>公众号文章校对样例</w:t></w:r></w:p>
+    <w:p><w:r><w:t>他知道自己错了，心情很繁重。</w:t></w:r></w:p>
+    <w:p><w:r><w:t>通过这次学习，使我们的思想觉悟有了很大提高。</w:t></w:r></w:p>
+    <w:tbl><w:tr><w:tc><w:p><w:r><w:t>只要经常锻炼身体，才会增强体质。</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+    <w:p><w:del><w:r><w:t>这段删除修订不应进入分析。</w:t></w:r></w:del><w:r><w:t>这是保留的正文。</w:t></w:r></w:p>
+  </w:body>
+</w:document>

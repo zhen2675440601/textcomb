@@ -1,0 +1,11 @@
+/target/
+/web/node_modules/
+/web/dist/
+/.env
+/.sqlx/
+/data/
+/private-evaluation/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

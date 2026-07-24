@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://textcomb.dev/schemas/evaluation-label-v1.json",
+  "title": "TextComb adjudicated document",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document_id", "issues"],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "char_start", "char_end"],
+        "properties": {
+          "category": {
+            "enum": ["typo", "punctuation", "grammar", "paragraph"]
+          },
+          "grammar_subtype": {
+            "enum": [
+              "word_order",
+              "collocation",
+              "missing_or_redundant_component",
+              "mixed_structure",
+              "ambiguity",
+              "illogical",
+              "conjunction",
+              "word_misuse"
+            ]
+          },
+          "char_start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "char_end": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "adjudication_note": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

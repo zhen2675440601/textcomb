@@ -1,0 +1,16 @@
+[package]
+name = "textcomb-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+secrecy.workspace = true
+sqlx.workspace = true
+textcomb-core.workspace = true
+tokio.workspace = true
+uuid.workspace = true

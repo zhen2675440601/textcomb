@@ -1,0 +1,380 @@
+use crate::state::AppState;
+use axum::{Json, Router, routing::get};
+use serde_json::{Value, json};
+
+pub fn router() -> Router<AppState> {
+    Router::new().route("/api/openapi.json", get(specification))
+}
+
+async fn specification() -> Json<Value> {
+    Json(json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "TextComb API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "文梳中国大陆简体中文辅助校对 API。所有错误使用 application/problem+json。"
+        },
+        "servers": [{ "url": "/api/v1" }],
+        "tags": [
+            { "name": "auth" },
+            { "name": "documents" },
+            { "name": "analyses" },
+            { "name": "reports" },
+            { "name": "models" },
+            { "name": "admin" }
+        ],
+        "paths": {
+            "/auth/login": {
+                "post": {
+                    "tags": ["auth"],
+                    "requestBody": { "$ref": "#/components/requestBodies/Login" },
+                    "responses": {
+                        "200": {
+                            "description": "登录成功",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } }
+                        },
+                        "401": { "$ref": "#/components/responses/Problem" }
+                    }
+                }
+            },
+            "/auth/logout": {
+                "post": {
+                    "tags": ["auth"],
+                    "responses": { "204": { "description": "已退出" } }
+                }
+            },
+            "/me": {
+                "get": {
+                    "tags": ["auth"],
+                    "responses": {
+                        "200": {
+                            "description": "当前用户",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } }
+                        }
+                    }
+                }
+            },
+            "/documents": {
+                "get": {
+                    "tags": ["documents"],
+                    "responses": { "200": { "description": "文档列表" } }
+                },
+                "post": {
+                    "tags": ["documents"],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "multipart/form-data": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["file"],
+                                "properties": { "file": { "type": "string", "format": "binary" } }
+                            }
+                        } }
+                    },
+                    "responses": {
+                        "201": { "description": "上传成功" },
+                        "413": { "$ref": "#/components/responses/Problem" },
+                        "422": { "$ref": "#/components/responses/Problem" }
+                    }
+                }
+            },
+            "/documents/{id}": {
+                "delete": {
+                    "tags": ["documents"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "204": { "description": "已删除" } }
+                }
+            },
+            "/analyses": {
+                "get": {
+                    "tags": ["analyses"],
+                    "responses": { "200": { "description": "任务列表" } }
+                },
+                "post": {
+                    "tags": ["analyses"],
+                    "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": {
+                            "schema": { "$ref": "#/components/schemas/CreateAnalysis" }
+                        } }
+                    },
+                    "responses": { "202": { "description": "任务已创建并排队" } }
+                }
+            },
+            "/analyses/{id}": {
+                "get": {
+                    "tags": ["analyses"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "200": { "description": "任务详情" } }
+                },
+                "delete": {
+                    "tags": ["analyses"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "204": { "description": "任务和报告已删除" } }
+                }
+            },
+            "/analyses/{id}/events": {
+                "get": {
+                    "tags": ["analyses"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": {
+                        "200": {
+                            "description": "任务进度事件流",
+                            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+                        }
+                    }
+                }
+            },
+            "/analyses/{id}/cancel": {
+                "post": {
+                    "tags": ["analyses"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "202": { "description": "已请求取消" } }
+                }
+            },
+            "/analyses/{id}/retry": {
+                "post": {
+                    "tags": ["analyses"],
+                    "parameters": [
+                        { "$ref": "#/components/parameters/UuidId" },
+                        { "$ref": "#/components/parameters/IdempotencyKey" }
+                    ],
+                    "responses": { "202": { "description": "已重新排队" } }
+                }
+            },
+            "/reports/{id}": {
+                "get": {
+                    "tags": ["reports"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": {
+                        "200": {
+                            "description": "规范化报告",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReportV1" } } }
+                        }
+                    }
+                },
+                "delete": {
+                    "tags": ["reports"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "204": { "description": "已删除" } }
+                }
+            },
+            "/reports/{id}/export/{format}": {
+                "get": {
+                    "tags": ["reports"],
+                    "parameters": [
+                        { "$ref": "#/components/parameters/UuidId" },
+                        {
+                            "name": "format",
+                            "in": "path",
+                            "required": true,
+                            "schema": { "type": "string", "enum": ["json", "md", "pdf"] }
+                        }
+                    ],
+                    "responses": { "200": { "description": "报告文件" } }
+                }
+            },
+            "/reports/{id}/issues": {
+                "get": {
+                    "tags": ["reports"],
+                    "parameters": [
+                        { "$ref": "#/components/parameters/UuidId" },
+                        { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1 } },
+                        { "name": "per_page", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100 } },
+                        { "name": "category", "in": "query", "schema": { "type": "string", "enum": ["typo", "punctuation", "grammar", "paragraph"] } },
+                        { "name": "level", "in": "query", "schema": { "type": "string", "enum": ["confirmed", "suspected"] } },
+                        { "name": "min_confidence", "in": "query", "schema": { "type": "integer", "minimum": 0, "maximum": 100 } },
+                        { "name": "feedback", "in": "query", "schema": { "type": "string", "enum": ["correct", "incorrect", "disputed", "none"] } }
+                    ],
+                    "responses": { "200": { "description": "筛选和分页后的问题列表" } }
+                }
+            },
+            "/issues/{id}/feedback": {
+                "post": {
+                    "tags": ["reports"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "204": { "description": "反馈已保存" } }
+                }
+            },
+            "/model-profiles": {
+                "get": {
+                    "tags": ["models"],
+                    "responses": { "200": { "description": "模型配置列表" } }
+                },
+                "post": {
+                    "tags": ["models"],
+                    "responses": { "201": { "description": "模型配置已创建" } }
+                }
+            },
+            "/model-profiles/{id}/test": {
+                "post": {
+                    "tags": ["models"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "200": { "description": "模型连接测试结果" } }
+                }
+            },
+            "/model-profiles/{id}/enabled": {
+                "patch": {
+                    "tags": ["models"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "204": { "description": "模型配置状态已更新" } }
+                }
+            },
+            "/admin/users": {
+                "get": {
+                    "tags": ["admin"],
+                    "responses": { "200": { "description": "用户列表" } }
+                },
+                "post": {
+                    "tags": ["admin"],
+                    "responses": { "201": { "description": "用户已创建" } }
+                }
+            },
+            "/admin/system-status": {
+                "get": {
+                    "tags": ["admin"],
+                    "responses": { "200": { "description": "队列、Worker、失败任务与报告保留状态" } }
+                }
+            },
+            "/admin/users/{id}/status": {
+                "patch": {
+                    "tags": ["admin"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "204": { "description": "用户状态已更新" } }
+                }
+            },
+            "/admin/users/{id}/password": {
+                "post": {
+                    "tags": ["admin"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": { "204": { "description": "用户密码已重置" } }
+                }
+            }
+        },
+        "components": {
+            "parameters": {
+                "UuidId": {
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string", "format": "uuid" }
+                },
+                "IdempotencyKey": {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": false,
+                    "schema": { "type": "string", "minLength": 8, "maxLength": 128 }
+                }
+            },
+            "requestBodies": {
+                "Login": {
+                    "required": true,
+                    "content": { "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["username", "password"],
+                            "properties": {
+                                "username": { "type": "string" },
+                                "password": { "type": "string", "format": "password" }
+                            }
+                        }
+                    } }
+                }
+            },
+            "responses": {
+                "Problem": {
+                    "description": "请求失败",
+                    "content": { "application/problem+json": {
+                        "schema": { "$ref": "#/components/schemas/Problem" }
+                    } }
+                }
+            },
+            "schemas": {
+                "Problem": {
+                    "type": "object",
+                    "required": ["type", "title", "status", "code", "detail"],
+                    "properties": {
+                        "type": { "type": "string", "format": "uri" },
+                        "title": { "type": "string" },
+                        "status": { "type": "integer" },
+                        "code": { "type": "string" },
+                        "detail": { "type": "string" },
+                        "request_id": { "type": "string" }
+                    }
+                },
+                "User": {
+                    "type": "object",
+                    "required": ["id", "username", "role"],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "username": { "type": "string" },
+                        "role": { "type": "string", "enum": ["user", "super_admin"] }
+                    }
+                },
+                "CreateAnalysis": {
+                    "type": "object",
+                    "required": ["document_id", "model_profile_id"],
+                    "properties": {
+                        "document_id": { "type": "string", "format": "uuid" },
+                        "model_profile_id": { "type": "string", "format": "uuid" }
+                    }
+                },
+                "ReportV1": {
+                    "type": "object",
+                    "required": [
+                        "schema", "report_id", "job_id", "document", "analysis",
+                        "summary", "issues", "complete", "generated_at"
+                    ],
+                    "properties": {
+                        "schema": { "const": "textcomb.report.v1" },
+                        "report_id": { "type": "string", "format": "uuid" },
+                        "job_id": { "type": "string", "format": "uuid" },
+                        "document": { "type": "object" },
+                        "analysis": { "type": "object" },
+                        "summary": { "type": "object" },
+                        "issues": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/Issue" }
+                        },
+                        "complete": { "type": "boolean" },
+                        "generated_at": { "type": "string", "format": "date-time" }
+                    }
+                },
+                "Issue": {
+                    "type": "object",
+                    "required": [
+                        "id", "category", "level", "location", "original_text",
+                        "reason", "suggestion", "confidence", "evidence_refs"
+                    ],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "category": {
+                            "type": "string",
+                            "enum": ["typo", "punctuation", "grammar", "paragraph"]
+                        },
+                        "grammar_subtype": {
+                            "type": ["string", "null"],
+                            "enum": [
+                                "word_order", "collocation", "missing_or_redundant_component",
+                                "mixed_structure", "ambiguity", "illogical", "conjunction",
+                                "word_misuse", null
+                            ]
+                        },
+                        "level": { "type": "string", "enum": ["confirmed", "suspected"] },
+                        "location": { "type": "object" },
+                        "original_text": { "type": "string" },
+                        "reason": { "type": "string" },
+                        "suggestion": { "type": "string" },
+                        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "evidence_refs": { "type": "array", "items": { "type": "object" } },
+                        "feedback": {
+                            "type": ["string", "null"],
+                            "enum": ["correct", "incorrect", "disputed", null]
+                        }
+                    }
+                }
+            }
+        }
+    }))
+}

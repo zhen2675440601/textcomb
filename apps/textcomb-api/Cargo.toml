@@ -1,0 +1,30 @@
+[package]
+name = "textcomb-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-stream.workspace = true
+axum.workspace = true
+bytes.workspace = true
+cookie.workspace = true
+dotenvy.workspace = true
+http.workspace = true
+prometheus.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+textcomb-core.workspace = true
+textcomb-domain.workspace = true
+time.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+utoipa.workspace = true
+uuid.workspace = true

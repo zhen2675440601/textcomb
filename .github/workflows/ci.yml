@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run typecheck
+      - run: npm run build
+
+  migrations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_DB: textcomb
+          POSTGRES_USER: textcomb
+          POSTGRES_PASSWORD: textcomb-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U textcomb -d textcomb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      TEXTCOMB_DATABASE_URL: postgres://textcomb:textcomb-ci@localhost:5432/textcomb
+      TEXTCOMB_MASTER_KEY_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      TEXTCOMB_SECURE_COOKIES: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply migrations twice
+        run: |
+          cargo run --locked -p textcomb-cli -- migrate
+          cargo run --locked -p textcomb-cli -- migrate
+      - name: Verify seeded references
+        run: |
+          count=$(docker exec ${{ job.services.postgres.id }} \
+            psql -U textcomb -d textcomb -Atc "select count(*) from evidence_entries")
+          test "$count" -eq 3
+
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [rust, web]
+    env:
+      TEXTCOMB_POSTGRES_PASSWORD: textcomb-container-ci
+      TEXTCOMB_MASTER_KEY_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      TEXTCOMB_PUBLIC_ORIGIN: http://localhost:3000
+      TEXTCOMB_SECURE_COOKIES: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: worker
+          push: false
+          tags: textcomb-worker:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify worker tools
+        run: |
+          docker run --rm --entrypoint typst textcomb-worker:ci --version
+          docker run --rm --entrypoint pdftotext textcomb-worker:ci -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Start the deployable stack
+        run: docker compose up -d --build
+      - name: Smoke test and verify generated OpenAPI types
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://localhost:3000/readyz >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 60 ]; then
+              docker compose logs api migrate postgres
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --silent http://localhost:3000/healthz >/dev/null
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:3000/metrics)" = 404
+          npm --prefix web ci --ignore-scripts
+          npm --prefix web run generate:api
+          git diff --exit-code -- web/src/api/schema.d.ts
+      - name: Stop smoke-test stack
+        if: always()
+        run: docker compose down -v --remove-orphans

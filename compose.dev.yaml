@@ -1,0 +1,10 @@
+services:
+  fake-model:
+    build:
+      context: tools/fake-model
+    profiles: ["dev"]
+    restart: unless-stopped
+    environment:
+      FAKE_MODEL_DELAY_MS: ${TEXTCOMB_FAKE_MODEL_DELAY_MS:-0}
+    networks:
+      - backend

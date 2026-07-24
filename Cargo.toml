@@ -1,0 +1,85 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/textcomb-api",
+    "apps/textcomb-worker",
+    "apps/textcomb-cli",
+    "crates/textcomb-domain",
+    "crates/textcomb-core",
+    "tools/textcomb-eval",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "AGPL-3.0-or-later"
+authors = ["TextComb contributors"]
+repository = "https://github.com/textcomb/textcomb"
+
+[workspace.dependencies]
+anyhow = "1.0"
+argon2 = { version = "0.5", features = ["std"] }
+async-stream = "0.3"
+async-trait = "0.1"
+axum = { version = "0.8.9", features = ["json", "macros", "multipart"] }
+base64 = "0.22"
+bytes = "1.10"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+cookie = { version = "0.18", features = ["percent-encode"] }
+dotenvy = "0.15"
+encoding_rs = "0.8"
+futures = "0.3"
+hex = "0.4"
+http = "1.3"
+infer = "0.19"
+mime = "0.3"
+prometheus = "0.14"
+quick-xml = "0.41"
+rand = "0.9"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring-native-roots",
+    "postgres",
+    "uuid",
+    "time",
+    "json",
+    "migrate",
+    "macros",
+] }
+tempfile = "3.23"
+textcomb-domain = { path = "crates/textcomb-domain" }
+textcomb-core = { path = "crates/textcomb-core" }
+thiserror = "2.0"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1.48", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = [
+    "catch-panic",
+    "cors",
+    "limit",
+    "request-id",
+    "trace",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+unicode-segmentation = "1.12"
+url = { version = "2.5", features = ["serde"] }
+utoipa = { version = "5.4", features = ["axum_extras", "time", "uuid"] }
+utoipa-axum = "0.2"
+uuid = { version = "1.18", features = ["serde", "v4", "v7"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

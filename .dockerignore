@@ -1,0 +1,9 @@
+.git
+.github
+.env
+data
+target
+web/node_modules
+web/dist
+private-evaluation
+**/*.log
