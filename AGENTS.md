@@ -13,10 +13,13 @@
 ## 任务与进度同步
 
 - GitHub Issue、Project 和 Pull Request 是任务状态的唯一事实源；聊天记录和本地临时文件不是共享项目状态。
-- 开始工作前先阅读本文件、相关 Issue、`README.md` 和适用的 `docs/` 文档，并检查 `git status`、当前分支和最近提交。
+- 开始工作前按顺序阅读本文件、`docs/PROJECT.md`、`docs/ROADMAP.md`、`docs/STATUS.md`、相关 Issue、`README.md` 和适用的目录文档，并检查 `git status`、当前分支和最近提交。
+- `docs/PROJECT.md` 记录产品目标和边界，`docs/ROADMAP.md` 记录阶段计划和退出条件，`docs/STATUS.md` 记录面向新主机的当前快照；不要把这三份文档当作具体任务清单。
+- 如果 Issue 与产品目标、路线图或首版边界冲突，先记录差异并请求维护者决策，不要通过代码猜测方向或擅自扩大范围。
 - 一个明确功能使用一个 Issue、一个工作分支和一个 Pull Request。若任务很小，也要在提交或 PR 中说明范围和验收结果。
 - 开始任务时在 Issue 中说明负责范围；遇到阻塞时立即记录阻塞原因、已尝试方案和需要的决策。
 - 完成任务时更新 Issue 清单和状态，在 PR 中写明修改内容、验证命令、测试结果、风险和遗留问题。
+- 只有阶段、产品方向、阻塞项或退出条件发生变化时才更新 `docs/STATUS.md`；具体任务进度写在 Issue/PR 中，避免重复维护两个状态系统。
 - 不要同时在多台主机上修改同一个工作分支。开始前同步 `main`，完成后尽快推送；不要改写已共享分支历史。
 - 推荐分支命名：`feat/<topic>`、`fix/<topic>`、`docs/<topic>`、`chore/<topic>`、`test/<topic>`。
 - `main` 只通过 Pull Request 合并，除非维护者明确要求，不直接提交到 `main`。
