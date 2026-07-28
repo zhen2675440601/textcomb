@@ -57,7 +57,17 @@ async fn specification() -> Json<Value> {
             "/documents": {
                 "get": {
                     "tags": ["documents"],
-                    "responses": { "200": { "description": "文档列表" } }
+                    "responses": {
+                        "200": {
+                            "description": "文档列表",
+                            "content": { "application/json": {
+                                "schema": {
+                                    "type": "array",
+                                    "items": { "$ref": "#/components/schemas/DocumentRecord" }
+                                }
+                            } }
+                        }
+                    }
                 },
                 "post": {
                     "tags": ["documents"],
@@ -72,7 +82,33 @@ async fn specification() -> Json<Value> {
                         } }
                     },
                     "responses": {
-                        "201": { "description": "上传成功" },
+                        "201": {
+                            "description": "上传成功",
+                            "content": { "application/json": {
+                                "schema": { "$ref": "#/components/schemas/DocumentRecord" }
+                            } }
+                        },
+                        "413": { "$ref": "#/components/responses/Problem" },
+                        "422": { "$ref": "#/components/responses/Problem" }
+                    }
+                }
+            },
+            "/documents/text": {
+                "post": {
+                    "tags": ["documents"],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": {
+                            "schema": { "$ref": "#/components/schemas/CreateTextDocument" }
+                        } }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "粘贴正文已保存为待分析文档",
+                            "content": { "application/json": {
+                                "schema": { "$ref": "#/components/schemas/DocumentRecord" }
+                            } }
+                        },
                         "413": { "$ref": "#/components/responses/Problem" },
                         "422": { "$ref": "#/components/responses/Problem" }
                     }
@@ -200,11 +236,34 @@ async fn specification() -> Json<Value> {
             "/model-profiles": {
                 "get": {
                     "tags": ["models"],
-                    "responses": { "200": { "description": "模型配置列表" } }
+                    "responses": {
+                        "200": {
+                            "description": "模型配置列表",
+                            "content": { "application/json": {
+                                "schema": {
+                                    "type": "array",
+                                    "items": { "$ref": "#/components/schemas/ModelProfile" }
+                                }
+                            } }
+                        }
+                    }
                 },
                 "post": {
                     "tags": ["models"],
-                    "responses": { "201": { "description": "模型配置已创建" } }
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": {
+                            "schema": { "$ref": "#/components/schemas/CreateModelProfile" }
+                        } }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "模型配置已创建",
+                            "content": { "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ModelProfile" }
+                            } }
+                        }
+                    }
                 }
             },
             "/model-profiles/{id}/test": {
@@ -212,6 +271,27 @@ async fn specification() -> Json<Value> {
                     "tags": ["models"],
                     "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
                     "responses": { "200": { "description": "模型连接测试结果" } }
+                }
+            },
+            "/model-profiles/{id}": {
+                "patch": {
+                    "tags": ["models"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": {
+                            "schema": { "$ref": "#/components/schemas/UpdateModelProfile" }
+                        } }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "模型配置已更新",
+                            "content": { "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ModelProfile" }
+                            } }
+                        },
+                        "404": { "$ref": "#/components/responses/Problem" }
+                    }
                 }
             },
             "/model-profiles/{id}/enabled": {
@@ -318,6 +398,95 @@ async fn specification() -> Json<Value> {
                     "properties": {
                         "document_id": { "type": "string", "format": "uuid" },
                         "model_profile_id": { "type": "string", "format": "uuid" }
+                    }
+                },
+                "CreateTextDocument": {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {
+                        "text": { "type": "string", "minLength": 1, "maxLength": 50000 }
+                    }
+                },
+                "DocumentRecord": {
+                    "type": "object",
+                    "required": [
+                        "id", "original_name", "media_type", "document_format", "size_bytes",
+                        "content_available", "created_at"
+                    ],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "original_name": { "type": "string" },
+                        "media_type": { "type": "string" },
+                        "document_format": { "type": "string", "enum": ["txt", "docx", "pdf"] },
+                        "size_bytes": { "type": "integer", "format": "int64", "minimum": 0 },
+                        "char_count": { "type": ["integer", "null"], "minimum": 0 },
+                        "content_available": { "type": "boolean" },
+                        "created_at": { "type": "string", "format": "date-time" }
+                    }
+                },
+                "CreateModelProfile": {
+                    "type": "object",
+                    "required": [
+                        "name", "base_url", "api_key", "candidate_model", "disclosure_accepted"
+                    ],
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+                        "provider_kind": {
+                            "type": "string",
+                            "enum": ["openai_responses", "openai_compatible", "anthropic"]
+                        },
+                        "base_url": { "type": "string", "format": "uri", "maxLength": 2048 },
+                        "api_key": { "type": "string", "format": "password", "minLength": 1 },
+                        "candidate_model": { "type": "string", "minLength": 1, "maxLength": 160 },
+                        "verifier_model": { "type": "string", "maxLength": 160 },
+                        "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 100 },
+                        "shared": { "type": "boolean" },
+                        "disclosure_accepted": { "type": "boolean", "const": true }
+                    }
+                },
+                "UpdateModelProfile": {
+                    "type": "object",
+                    "required": ["name", "base_url", "candidate_model", "disclosure_accepted"],
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+                        "provider_kind": {
+                            "type": "string",
+                            "enum": ["openai_responses", "openai_compatible", "anthropic"]
+                        },
+                        "base_url": { "type": "string", "format": "uri", "maxLength": 2048 },
+                        "api_key": {
+                            "type": "string",
+                            "format": "password",
+                            "description": "可选；省略或留空时保留原有密钥"
+                        },
+                        "candidate_model": { "type": "string", "minLength": 1, "maxLength": 160 },
+                        "verifier_model": { "type": "string", "maxLength": 160 },
+                        "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 100 },
+                        "disclosure_accepted": { "type": "boolean", "const": true }
+                    }
+                },
+                "ModelProfile": {
+                    "type": "object",
+                    "required": [
+                        "id", "name", "provider_kind", "base_url", "candidate_model",
+                        "verifier_model", "max_concurrency", "enabled", "is_reference", "shared",
+                        "created_at"
+                    ],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "name": { "type": "string" },
+                        "provider_kind": {
+                            "type": "string",
+                            "enum": ["openai_responses", "openai_compatible", "anthropic"]
+                        },
+                        "base_url": { "type": "string", "format": "uri" },
+                        "candidate_model": { "type": "string" },
+                        "verifier_model": { "type": "string" },
+                        "max_concurrency": { "type": "integer" },
+                        "enabled": { "type": "boolean" },
+                        "is_reference": { "type": "boolean" },
+                        "shared": { "type": "boolean" },
+                        "created_at": { "type": "string", "format": "date-time" }
                     }
                 },
                 "ReportV1": {

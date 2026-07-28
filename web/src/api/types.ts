@@ -61,7 +61,7 @@ export interface Analysis {
 export interface ModelProfile {
   id: string;
   name: string;
-  provider_kind: string;
+  provider_kind: ProviderKind;
   base_url: string;
   candidate_model: string;
   verifier_model: string;
@@ -71,6 +71,8 @@ export interface ModelProfile {
   shared: boolean;
   created_at: string;
 }
+
+export type ProviderKind = "openai_responses" | "openai_compatible" | "anthropic";
 
 export type IssueCategory = "typo" | "punctuation" | "grammar" | "paragraph";
 export type IssueLevel = "confirmed" | "suspected";

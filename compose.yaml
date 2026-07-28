@@ -100,7 +100,7 @@ services:
     build:
       context: web
       args:
-        VITE_TEXTCOMB_SOURCE_URL: ${TEXTCOMB_SOURCE_URL:-https://github.com/textcomb/textcomb}
+        VITE_TEXTCOMB_SOURCE_URL: ${TEXTCOMB_SOURCE_URL:-https://github.com/zhen2675440601/textcomb}
     restart: unless-stopped
     ports:
       - "${TEXTCOMB_HTTP_PORT:-3000}:8080"

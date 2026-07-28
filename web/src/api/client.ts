@@ -5,6 +5,7 @@ import type {
   DocumentRecord,
   FeedbackVerdict,
   ModelProfile,
+  ProviderKind,
   ProblemDetails,
   Report,
   User,
@@ -71,6 +72,11 @@ export const api = {
   me: () => request<User>("/me"),
 
   documents: () => request<DocumentRecord[]>("/documents"),
+  createTextDocument: (text: string) =>
+    request<DocumentRecord>("/documents/text", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
   deleteDocument: (id: string) =>
     request<void>(`/documents/${id}`, { method: "DELETE" }),
 
@@ -107,6 +113,7 @@ export const api = {
   modelProfiles: () => request<ModelProfile[]>("/model-profiles"),
   createModelProfile: (input: {
     name: string;
+    provider_kind: ProviderKind;
     base_url: string;
     api_key: string;
     candidate_model: string;
@@ -117,6 +124,23 @@ export const api = {
   }) =>
     request<ModelProfile>("/model-profiles", {
       method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateModelProfile: (
+    id: string,
+    input: {
+      name: string;
+      provider_kind: ProviderKind;
+      base_url: string;
+      api_key?: string;
+      candidate_model: string;
+      verifier_model?: string;
+      max_concurrency: number;
+      disclosure_accepted: boolean;
+    },
+  ) =>
+    request<ModelProfile>(`/model-profiles/${id}`, {
+      method: "PATCH",
       body: JSON.stringify(input),
     }),
   testModelProfile: (id: string) =>

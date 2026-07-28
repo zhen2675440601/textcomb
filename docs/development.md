@@ -22,7 +22,7 @@ $rng.Dispose()
 数据库迁移由一次性 `migrate` 容器先执行。首次创建超管：
 
 ```shell
-docker compose --profile tools run --rm -e TEXTCOMB_ADMIN_PASSWORD='至少十二个字符的密码' cli bootstrap-admin --username admin
+docker compose --profile tools run --rm cli bootstrap-admin --username admin --password '至少十二个字符的密码'
 ```
 
 常用命令：
@@ -30,7 +30,7 @@ docker compose --profile tools run --rm -e TEXTCOMB_ADMIN_PASSWORD='至少十二
 ```shell
 docker compose logs -f api worker
 docker compose --profile tools run --rm cli doctor
-docker compose --profile tools run --rm -e TEXTCOMB_USER_PASSWORD='至少十二个字符的密码' cli create-user --username author01
+docker compose --profile tools run --rm cli create-user --username author01 --password '至少十二个字符的密码'
 docker compose down
 ```
 
@@ -63,9 +63,9 @@ cd web
 npm run generate:api
 ```
 
-生成结果是 `web/src/api/schema.d.ts`。CI 会在可部署容器栈上重新生成并检查差异，接口有变化时必须一并提交该文件。
+生成命令默认读取 3000 端口；若使用其他端口，可直接运行 `npx openapi-typescript http://localhost:<端口>/api/openapi.json -o src/api/schema.d.ts`。生成结果是 `web/src/api/schema.d.ts`。CI 会在可部署容器栈上重新生成并检查差异，接口有变化时必须一并提交该文件。
 
-开发服务器默认将 `/api` 代理到 `http://localhost:3000`。容器化开发建议直接使用 Caddy 暴露的 3000 端口。
+开发服务器默认将 `/api` 代理到 `http://localhost:3000`。容器化开发建议直接使用 Caddy 暴露的 `TEXTCOMB_HTTP_PORT`；未修改 `.env` 时默认是 3000。若该端口已被占用，可把 `.env` 中的 `TEXTCOMB_HTTP_PORT` 改为例如 `18080`，并同步把 `TEXTCOMB_PUBLIC_ORIGIN` 改为 `http://localhost:18080` 后重新执行 `docker compose up -d --build`。
 
 ## 确定性假模型
 

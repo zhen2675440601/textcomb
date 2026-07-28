@@ -466,7 +466,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["DocumentRecord"][];
+                    };
                 };
             };
         };
@@ -492,7 +494,50 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["DocumentRecord"];
+                    };
+                };
+                413: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/documents/text": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateTextDocument"];
+                };
+            };
+            responses: {
+                /** @description 粘贴正文已保存为待分析文档 */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DocumentRecord"];
+                    };
                 };
                 413: components["responses"]["Problem"];
                 422: components["responses"]["Problem"];
@@ -630,7 +675,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ModelProfile"][];
+                    };
                 };
             };
         };
@@ -642,14 +689,20 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateModelProfile"];
+                };
+            };
             responses: {
                 /** @description 模型配置已创建 */
                 201: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ModelProfile"];
+                    };
                 };
             };
         };
@@ -657,6 +710,48 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/model-profiles/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["UuidId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateModelProfile"];
+                };
+            };
+            responses: {
+                /** @description 模型配置已更新 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ModelProfile"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
         trace?: never;
     };
     "/model-profiles/{id}/enabled": {
@@ -873,6 +968,38 @@ export interface components {
             /** Format: uuid */
             model_profile_id: string;
         };
+        CreateModelProfile: {
+            /** Format: password */
+            api_key: string;
+            /** Format: uri */
+            base_url: string;
+            candidate_model: string;
+            /** @constant */
+            disclosure_accepted: true;
+            max_concurrency?: number;
+            name: string;
+            /** @enum {string} */
+            provider_kind?: "openai_responses" | "openai_compatible" | "anthropic";
+            shared?: boolean;
+            verifier_model?: string;
+        };
+        CreateTextDocument: {
+            text: string;
+        };
+        DocumentRecord: {
+            char_count?: number | null;
+            content_available: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** @enum {string} */
+            document_format: "txt" | "docx" | "pdf";
+            /** Format: uuid */
+            id: string;
+            media_type: string;
+            original_name: string;
+            /** Format: int64 */
+            size_bytes: number;
+        };
         Issue: {
             /** @enum {string} */
             category: "typo" | "punctuation" | "grammar" | "paragraph";
@@ -890,6 +1017,23 @@ export interface components {
             original_text: string;
             reason: string;
             suggestion: string;
+        };
+        ModelProfile: {
+            /** Format: uri */
+            base_url: string;
+            candidate_model: string;
+            /** Format: date-time */
+            created_at: string;
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            is_reference: boolean;
+            max_concurrency: number;
+            name: string;
+            /** @enum {string} */
+            provider_kind: "openai_responses" | "openai_compatible" | "anthropic";
+            shared: boolean;
+            verifier_model: string;
         };
         Problem: {
             code: string;
@@ -914,6 +1058,23 @@ export interface components {
             /** @constant */
             schema: "textcomb.report.v1";
             summary: Record<string, never>;
+        };
+        UpdateModelProfile: {
+            /**
+             * Format: password
+             * @description 可选；省略或留空时保留原有密钥
+             */
+            api_key?: string;
+            /** Format: uri */
+            base_url: string;
+            candidate_model: string;
+            /** @constant */
+            disclosure_accepted: true;
+            max_concurrency?: number;
+            name: string;
+            /** @enum {string} */
+            provider_kind?: "openai_responses" | "openai_compatible" | "anthropic";
+            verifier_model?: string;
         };
         User: {
             /** Format: uuid */

@@ -5,10 +5,10 @@
 ## 当前范围
 
 - 中国大陆简体中文。
-- TXT、DOCX、文字型 PDF，单文件不超过 20 MiB、正文不超过 5 万字。
+- 直接粘贴正文、TXT、DOCX、文字型 PDF；单文件不超过 20 MiB、正文不超过 5 万字。
 - AI 高召回候选与 AI 二次复核。
 - 在线报告、JSON、Markdown 和 PDF 导出。
-- 用户自带 OpenAI 兼容模型密钥。
+- 用户自带 OpenAI Responses、OpenAI Compatible 或 Anthropic 模型密钥。
 
 扫描 PDF、OCR、事实核查、论文格式、全文一致性和自动改写不在首版范围内。
 
@@ -28,12 +28,13 @@
 3. 运行以下命令创建唯一的首个超管：
 
 ```shell
-docker compose --profile tools run --rm -e TEXTCOMB_ADMIN_PASSWORD='至少十二个字符的密码' cli bootstrap-admin --username admin
+docker compose --profile tools run --rm cli bootstrap-admin --username admin --password '至少十二个字符的密码'
 ```
 
-4. 打开 `http://localhost:3000`，登录后创建自己的 OpenAI 兼容模型配置。
+4. 打开 `http://localhost:3000`；如果 `.env` 中改过 `TEXTCOMB_HTTP_PORT`，请使用对应端口。登录后创建自己的 OpenAI Responses、OpenAI Compatible 或 Anthropic 模型配置。
+5. 在“新建分析”中选择上传文件或“粘贴正文”，再选择模型配置并开始分析。
 
-完整开发方式、密钥生成命令和故障排查见 [`docs/development.md`](docs/development.md)。架构取舍见 [`docs/architecture.md`](docs/architecture.md)，部署与备份见 [`docs/operations.md`](docs/operations.md)。
+完整开发方式、密钥生成命令和故障排查见 [`docs/development.md`](docs/development.md)。模型接口格式、修改配置与质量边界见 [`docs/model-providers.md`](docs/model-providers.md)。架构取舍见 [`docs/architecture.md`](docs/architecture.md)，部署与备份见 [`docs/operations.md`](docs/operations.md)。
 
 > 当前仓库实现的是可部署的开源 MVP 基线。参考模型的 90% / 90% / 70% 质量门槛必须在独立私有评测集上达成后，才能在发布说明中标记为“质量验证配置”。仓库本身不会伪造该认证。
 

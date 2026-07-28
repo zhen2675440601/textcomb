@@ -12,7 +12,7 @@ const auth = useAuth();
 const route = useRoute();
 const router = useRouter();
 const sourceUrl =
-  import.meta.env.VITE_TEXTCOMB_SOURCE_URL ?? "https://github.com/textcomb/textcomb";
+  import.meta.env.VITE_TEXTCOMB_SOURCE_URL ?? "https://github.com/zhen2675440601/textcomb";
 
 async function submit() {
   error.value = "";

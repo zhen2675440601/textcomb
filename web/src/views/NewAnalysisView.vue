@@ -4,9 +4,14 @@ import { useRouter } from "vue-router";
 import { api, ApiProblem, uploadDocument } from "@/api/client";
 import type { DocumentRecord, ModelProfile } from "@/api/types";
 
+type SourceMode = "file" | "text";
+
+const MAX_TEXT_CHARS = 50_000;
 const router = useRouter();
 const input = ref<HTMLInputElement>();
 const selectedFile = ref<File | null>(null);
+const sourceMode = ref<SourceMode>("file");
+const pastedText = ref("");
 const profiles = ref<ModelProfile[]>([]);
 const selectedProfileId = ref("");
 const loadingProfiles = ref(true);
@@ -16,6 +21,13 @@ const error = ref("");
 const dragging = ref(false);
 
 const usableProfiles = computed(() => profiles.value.filter((profile) => profile.enabled));
+const pastedCharCount = computed(() => Array.from(pastedText.value).length);
+const pastedTextTooLong = computed(() => pastedCharCount.value > MAX_TEXT_CHARS);
+const sourceReady = computed(() =>
+  sourceMode.value === "file"
+    ? Boolean(selectedFile.value)
+    : !pastedTextTooLong.value && pastedText.value.trim().length > 0,
+);
 const selectedProfile = computed(() =>
   profiles.value.find((profile) => profile.id === selectedProfileId.value),
 );
@@ -33,11 +45,22 @@ function selectFile(file?: File) {
     return;
   }
   selectedFile.value = file;
+  sourceMode.value = "file";
 }
 
 function onDrop(event: DragEvent) {
   dragging.value = false;
   selectFile(event.dataTransfer?.files[0]);
+}
+
+function chooseSource(mode: SourceMode) {
+  error.value = "";
+  sourceMode.value = mode;
+}
+
+function clearPastedText() {
+  pastedText.value = "";
+  error.value = "";
 }
 
 function formatSize(bytes: number) {
@@ -46,15 +69,25 @@ function formatSize(bytes: number) {
 }
 
 async function startAnalysis() {
-  if (!selectedFile.value || !selectedProfileId.value) return;
+  if (!sourceReady.value || !selectedProfileId.value) return;
+  const source = sourceMode.value;
+  const file = selectedFile.value;
+  const text = pastedText.value;
   error.value = "";
   submitting.value = true;
   uploadProgress.value = 0;
   let document: DocumentRecord | null = null;
   try {
-    document = await uploadDocument(selectedFile.value, (progress) => {
-      uploadProgress.value = progress;
-    });
+    if (source === "file") {
+      if (!file) return;
+      document = await uploadDocument(file, (progress) => {
+        uploadProgress.value = progress;
+      });
+    } else {
+      uploadProgress.value = 35;
+      document = await api.createTextDocument(text);
+      uploadProgress.value = 100;
+    }
     const job = await api.createAnalysis(document.id, selectedProfileId.value);
     await router.push(`/analyses/${job.id}`);
   } catch (cause) {
@@ -99,12 +132,32 @@ onMounted(loadProfiles);
         <div class="step-heading">
           <span>01</span>
           <div>
-            <h3>选择文章</h3>
-            <p>支持 UTF-8 / GB18030 TXT、DOCX 与文字型 PDF。</p>
+            <h3>添加文章</h3>
+            <p>上传文件，或直接粘贴正文；粘贴内容将按 TXT 文章处理。</p>
           </div>
         </div>
 
+        <div class="source-tabs" role="tablist" aria-label="文章来源">
+          <button
+            type="button"
+            :class="{ selected: sourceMode === 'file' }"
+            :aria-selected="sourceMode === 'file'"
+            @click="chooseSource('file')"
+          >
+            上传文件
+          </button>
+          <button
+            type="button"
+            :class="{ selected: sourceMode === 'text' }"
+            :aria-selected="sourceMode === 'text'"
+            @click="chooseSource('text')"
+          >
+            粘贴正文
+          </button>
+        </div>
+
         <button
+          v-if="sourceMode === 'file'"
           class="drop-zone"
           :class="{ dragging, selected: selectedFile }"
           type="button"
@@ -129,9 +182,30 @@ onMounted(loadProfiles);
           <template v-else>
             <div class="upload-glyph">↑</div>
             <strong>拖放文章到这里，或点击选择</strong>
-            <span>单文件不超过 20 MiB，正文不超过 5 万字</span>
+            <span>支持 TXT、DOCX、文字型 PDF；单文件不超过 20 MiB</span>
           </template>
         </button>
+
+        <div v-else class="pasted-text-panel">
+          <label class="sr-only" for="pasted-article">文章正文</label>
+          <textarea
+            id="pasted-article"
+            v-model="pastedText"
+            :aria-invalid="pastedTextTooLong"
+            :disabled="submitting"
+            placeholder="把已写好的文章正文直接粘贴到这里。保留换行可帮助文梳识别段落。"
+            rows="12"
+          />
+          <div class="pasted-text-meta">
+            <span :class="{ over: pastedTextTooLong }">
+              {{ pastedCharCount.toLocaleString() }} / {{ MAX_TEXT_CHARS.toLocaleString() }} 字
+              <template v-if="pastedTextTooLong">（已超出上限）</template>
+            </span>
+            <button v-if="pastedText" class="text-button" type="button" @click="clearPastedText">
+              清空正文
+            </button>
+          </div>
+        </div>
       </section>
 
       <section class="card form-card">
@@ -177,7 +251,9 @@ onMounted(loadProfiles);
 
       <div v-if="submitting" class="upload-progress-card">
         <div>
-          <strong>{{ uploadProgress < 100 ? "正在上传" : "正在创建分析任务" }}</strong>
+          <strong>
+            {{ uploadProgress < 100 ? (sourceMode === "file" ? "正在上传" : "正在保存正文") : "正在创建分析任务" }}
+          </strong>
           <span>{{ uploadProgress }}%</span>
         </div>
         <div class="mini-progress large">
@@ -188,7 +264,7 @@ onMounted(loadProfiles);
       <button
         class="button primary wide action-button"
         type="button"
-        :disabled="!selectedFile || !selectedProfileId || submitting"
+        :disabled="!sourceReady || !selectedProfileId || submitting"
         @click="startAnalysis"
       >
         {{ submitting ? "正在提交…" : "开始分析" }}

@@ -5,8 +5,8 @@ use crate::{
     db, documents,
     error::{CoreError, CoreResult, ErrorCode},
     provider::{
-        AnalysisProvider, CandidateIssue, OpenAiCompatibleProvider, ProviderProfile,
-        VerifiedCandidate,
+        AnalysisProvider, CandidateIssue, ProviderKind, ProviderProfile, VerifiedCandidate,
+        create_provider,
     },
     reporting,
     storage::LocalStorage,
@@ -208,14 +208,18 @@ impl Worker {
         db::set_job_configuration(&self.pool, job.id, prompt_record.id, &model_snapshot).await?;
 
         let api_key = decrypt_secret(&self.config.master_key, &model_record.api_key_ciphertext)?;
-        let provider = Arc::new(OpenAiCompatibleProvider::new(ProviderProfile {
-            base_url: model_record.base_url.clone(),
-            api_key,
-            candidate_model: model_record.candidate_model.clone(),
-            verifier_model: model_record.verifier_model.clone(),
-            candidate_system_prompt: prompt_record.candidate_template.clone(),
-            verifier_system_prompt: prompt_record.verifier_template.clone(),
-        })?);
+        let provider_kind = ProviderKind::parse(&model_record.provider_kind)?;
+        let provider = create_provider(
+            provider_kind,
+            ProviderProfile {
+                base_url: model_record.base_url.clone(),
+                api_key,
+                candidate_model: model_record.candidate_model.clone(),
+                verifier_model: model_record.verifier_model.clone(),
+                candidate_system_prompt: prompt_record.candidate_template.clone(),
+                verifier_system_prompt: prompt_record.verifier_template.clone(),
+            },
+        )?;
         let evidence_ids: Arc<Vec<String>> = Arc::new(evidence.keys().cloned().collect());
         let profile_semaphore = {
             let mut semaphores = self.profile_semaphores.lock().await;
@@ -503,7 +507,7 @@ async fn analyze_chunk(
     pool: &PgPool,
     job_id: Uuid,
     chunk: AnalysisChunk,
-    provider: Arc<OpenAiCompatibleProvider>,
+    provider: Arc<dyn AnalysisProvider>,
     semaphore: Arc<Semaphore>,
     profile_semaphore: Arc<Semaphore>,
     extracted: Arc<documents::ExtractedDocument>,

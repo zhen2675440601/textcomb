@@ -7,13 +7,13 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::StatusCode,
-    routing::{delete, get},
+    routing::{delete, get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path as FilePath;
 use textcomb_core::{
     CoreError, ErrorCode,
-    documents::{self, MAX_UPLOAD_BYTES},
+    documents::{self, MAX_TEXT_CHARS, MAX_UPLOAD_BYTES},
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -25,6 +25,10 @@ pub fn router() -> Router<AppState> {
             get(list)
                 .post(upload)
                 .layer(DefaultBodyLimit::max(21 * 1024 * 1024)),
+        )
+        .route(
+            "/documents/text",
+            post(create_text).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route("/documents/{id}", delete(remove))
 }
@@ -40,6 +44,15 @@ pub struct DocumentResponse {
     pub content_available: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+}
+
+struct PendingDocument<'a> {
+    filename: &'a str,
+    media_type: &'a str,
+    format: &'a str,
+    bytes: &'a [u8],
+    char_count: Option<i32>,
+    operation: &'static str,
 }
 
 async fn list(
@@ -107,11 +120,57 @@ async fn upload(
     })?;
     let format = documents::detect_format(&filename, &bytes)?;
     documents::validate_media_type(format, &media_type)?;
-    let extension = format.as_str();
+    persist_document(
+        &state,
+        user.id,
+        PendingDocument {
+            filename: &filename,
+            media_type: &media_type,
+            format: format.as_str(),
+            bytes: &bytes,
+            char_count: None,
+            operation: "document_upload",
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTextDocumentRequest {
+    text: String,
+}
+
+async fn create_text(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Json(input): Json<CreateTextDocumentRequest>,
+) -> ApiResult<(StatusCode, Json<DocumentResponse>)> {
+    let char_count = validate_pasted_text(&input.text)?;
+    let bytes = input.text.into_bytes();
+    persist_document(
+        &state,
+        user.id,
+        PendingDocument {
+            filename: "粘贴文章.txt",
+            media_type: "text/plain; charset=utf-8",
+            format: "txt",
+            bytes: &bytes,
+            char_count: Some(char_count as i32),
+            operation: "document_paste",
+        },
+    )
+    .await
+}
+
+async fn persist_document(
+    state: &AppState,
+    user_id: Uuid,
+    document: PendingDocument<'_>,
+) -> ApiResult<(StatusCode, Json<DocumentResponse>)> {
     let document_id = Uuid::new_v4();
     let storage_path = state
         .storage
-        .write_upload(document_id, extension, &bytes)
+        .write_upload(document_id, document.format, document.bytes)
         .await?;
     let expires_at = OffsetDateTime::now_utc()
         + time::Duration::hours(state.config.failed_input_retention_hours);
@@ -119,19 +178,20 @@ async fn upload(
         r#"
         INSERT INTO documents(
             id, user_id, original_name, media_type, document_format,
-            size_bytes, storage_path, input_expires_at
+            size_bytes, char_count, storage_path, input_expires_at
         )
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
         RETURNING id, original_name, media_type, document_format, size_bytes,
                   char_count, storage_path IS NOT NULL AND input_expires_at > now() AS content_available, created_at
         "#,
     )
     .bind(document_id)
-    .bind(user.id)
-    .bind(filename)
-    .bind(media_type)
-    .bind(format.as_str())
-    .bind(bytes.len() as i64)
+    .bind(user_id)
+    .bind(document.filename)
+    .bind(document.media_type)
+    .bind(document.format)
+    .bind(document.bytes.len() as i64)
+    .bind(document.char_count)
     .bind(storage_path.to_string_lossy().as_ref())
     .bind(expires_at)
     .fetch_one(&state.pool)
@@ -141,7 +201,7 @@ async fn upload(
             state
                 .metrics
                 .operations
-                .with_label_values(&["document_upload", "success"])
+                .with_label_values(&[document.operation, "success"])
                 .inc();
             Ok((StatusCode::CREATED, Json(row)))
         }
@@ -150,6 +210,23 @@ async fn upload(
             Err(error.into())
         }
     }
+}
+
+fn validate_pasted_text(text: &str) -> Result<usize, ApiError> {
+    if text.trim().is_empty() {
+        return Err(ApiError(CoreError::public(
+            ErrorCode::ConfigurationInvalid,
+            "请粘贴需要分析的文章正文",
+        )));
+    }
+    let char_count = text.chars().count();
+    if char_count > MAX_TEXT_CHARS {
+        return Err(ApiError(CoreError::public(
+            ErrorCode::TextTooLong,
+            format!("正文超过 {MAX_TEXT_CHARS} 字上限"),
+        )));
+    }
+    Ok(char_count)
 }
 
 async fn remove(
@@ -212,4 +289,20 @@ fn safe_filename(value: &str) -> String {
         .filter(|character| !character.is_control())
         .take(180)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasted_text_validation_counts_unicode_characters() {
+        assert_eq!(validate_pasted_text("中文 A\n第二行").unwrap(), 8);
+    }
+
+    #[test]
+    fn pasted_text_validation_rejects_blank_and_oversized_input() {
+        assert!(validate_pasted_text(" \n\t ").is_err());
+        assert!(validate_pasted_text(&"文".repeat(MAX_TEXT_CHARS + 1)).is_err());
+    }
 }

@@ -514,6 +514,12 @@ svg {
   color: #aaa9a2;
 }
 
+.field-hint {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .loading-card,
 .inline-loading {
   display: flex;
@@ -965,6 +971,34 @@ svg {
   font-size: 11px;
 }
 
+.source-tabs {
+  display: inline-flex;
+  gap: 3px;
+  margin: -2px 0 14px;
+  padding: 3px;
+  border: 1px solid #dedbd3;
+  border-radius: 9px;
+  background: #f5f3ed;
+}
+
+.source-tabs button {
+  min-height: 31px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  color: #70736c;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.source-tabs button.selected {
+  color: var(--forest);
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(32 45 38 / 12%);
+}
+
 .drop-zone {
   display: grid;
   width: 100%;
@@ -1005,6 +1039,60 @@ svg {
   margin-top: 6px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.pasted-text-panel {
+  overflow: hidden;
+  border: 1px solid #cfd7d0;
+  border-radius: 12px;
+  background: #fbfcf9;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.pasted-text-panel:focus-within {
+  border-color: #4d7768;
+  box-shadow: 0 0 0 3px rgb(77 119 104 / 10%);
+}
+
+.pasted-text-panel textarea {
+  display: block;
+  width: 100%;
+  min-height: 230px;
+  padding: 16px 17px;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font: 13px/1.8 "Noto Serif CJK SC", "Source Han Serif SC", SimSun, serif;
+  resize: vertical;
+}
+
+.pasted-text-panel textarea::placeholder {
+  color: #a4a69f;
+}
+
+.pasted-text-panel textarea:disabled {
+  color: var(--muted);
+  cursor: wait;
+}
+
+.pasted-text-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 39px;
+  padding: 0 13px 0 17px;
+  border-top: 1px solid #e6e8e2;
+  color: var(--muted);
+  background: #f5f7f3;
+  font-size: 10px;
+}
+
+.pasted-text-meta .over {
+  color: var(--red);
+  font-weight: 700;
 }
 
 .upload-glyph {

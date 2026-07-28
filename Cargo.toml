@@ -15,7 +15,7 @@ edition = "2024"
 rust-version = "1.97.1"
 license = "AGPL-3.0-or-later"
 authors = ["TextComb contributors"]
-repository = "https://github.com/textcomb/textcomb"
+repository = "https://github.com/zhen2675440601/textcomb"
 
 [workspace.dependencies]
 anyhow = "1.0"

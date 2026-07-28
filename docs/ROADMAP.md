@@ -10,9 +10,9 @@
 
 - Rust API、Worker、管理 CLI 和 Vue 3 工作台。
 - PostgreSQL 任务队列、租约恢复、取消、失败块重试和异步进度。
-- TXT、DOCX、文字型 PDF 提取及来源定位。
+- 直接粘贴正文、TXT、DOCX、文字型 PDF 提取及来源定位。
 - 双轮 AI 候选/复核、统一报告对象、JSON/Markdown/PDF 导出。
-- 登录、管理员创建用户、BYOK 模型配置、数据清理和安全边界。
+- 登录、管理员创建用户、可修改的 BYOK 模型配置、数据清理和安全边界。
 - Docker Compose、假模型、评测工具、测试样例和开发文档。
 
 ## 阶段一：MVP 质量加固

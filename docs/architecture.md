@@ -7,14 +7,17 @@ TextComb 是模块化单体。API 与 Worker 使用同一套 Rust 领域模块�
                     │                 ▲
                     └── 共享存储      │ SKIP LOCKED＋租约
                           ▲           │
-                          └──────── Worker ── OpenAI 兼容模型
+                          └──────── Worker ── 可配置模型协议
+                                      ├── OpenAI Responses
+                                      ├── OpenAI Compatible
+                                      ├── Anthropic Messages
                                       ├── Poppler
                                       └── Typst＋Noto CJK
 ```
 
 ## 任务生命周期
 
-1. API 校验扩展名、MIME、文件签名和 20 MiB 上限，将随机 UUID 文件名写入私有存储。
+1. API 接收上传文件或直接粘贴的 UTF-8 正文；前者校验扩展名、MIME、文件签名和 20 MiB 上限，后者校验非空与 5 万字上限。两者都会以随机 UUID 写入私有存储，并沿用相同的分析、定位和清理链路。
 2. Worker 使用 `FOR UPDATE SKIP LOCKED` 原子领取任务，写入两分钟租约，并每 30 秒续租。
 3. 解析器建立不可变提取正文与来源映射。分析只使用字符下标，不信任模型提供的绝对位置。
 4. 按完整段落生成约 3000 字、最多 4000 字文本块；相邻块最多重叠一个 500 字段落。
@@ -38,7 +41,7 @@ TextComb 是模块化单体。API 与 Worker 使用同一套 Rust 领域模块�
 - `textcomb-domain`：无基础设施依赖的公共类型和版本化报告。
 - `textcomb-core::documents`：格式识别、资源限制、正文提取和位置映射。
 - `textcomb-core::analysis`：切块、唯一定位、置信度分层和去重。
-- `textcomb-core::provider`：统一 Provider trait、OpenAI 兼容协议、重试和 JSON 修复。
+- `textcomb-core::provider`：统一 Provider trait、协议工厂（OpenAI Responses、OpenAI Compatible、Anthropic）、重试和 JSON 修复。
 - `textcomb-core::db`：队列租约、持久化、清理和报告事务。
 - `textcomb-core::worker`：编排，不承载 HTTP 逻辑。
 - `textcomb-api`：认证、资源所有权、SSE、管理和导出。
