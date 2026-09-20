@@ -7,7 +7,7 @@
 - 中国大陆简体中文。
 - 直接粘贴正文、TXT、DOCX、文字型 PDF；单文件不超过 20 MiB、正文不超过 5 万字。
 - AI 高召回候选与 AI 二次复核。
-- 在线报告、JSON、Markdown 和 PDF 导出。
+- 在线报告、可定位问题的分析原文、JSON、Markdown 和 PDF 导出。
 - 用户自带 OpenAI Responses、OpenAI Compatible 或 Anthropic 模型密钥。
 
 扫描 PDF、OCR、事实核查、论文格式、全文一致性和自动改写不在首版范围内。

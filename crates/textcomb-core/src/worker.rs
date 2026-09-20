@@ -13,7 +13,6 @@ use crate::{
 };
 use ::time::OffsetDateTime;
 use futures::{StreamExt, stream};
-use serde_json::json;
 use sqlx::PgPool;
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use textcomb_domain::{
@@ -103,11 +102,15 @@ impl Worker {
 
     async fn process_claimed(&self, job: db::ClaimedJob, worker_id: &str) {
         let heartbeat_cancel = CancellationToken::new();
+        let stop_token = CancellationToken::new();
+        let lease_lost = CancellationToken::new();
         let heartbeat_task = {
             let pool = self.pool.clone();
             let job_id = job.id;
             let worker_id = worker_id.to_owned();
             let cancel = heartbeat_cancel.clone();
+            let stop = stop_token.clone();
+            let lease_lost = lease_lost.clone();
             tokio::spawn(async move {
                 let mut interval = time::interval(Duration::from_secs(30));
                 interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
@@ -117,6 +120,10 @@ impl Worker {
                         _ = interval.tick() => {
                             if let Err(error) = db::refresh_lease(&pool, job_id, &worker_id).await {
                                 warn!(job_id = %job_id, error = %error, "job lease heartbeat failed");
+                                if !db::is_cancel_requested(&pool, job_id).await.unwrap_or(false) {
+                                    lease_lost.cancel();
+                                }
+                                stop.cancel();
                                 break;
                             }
                         }
@@ -124,10 +131,42 @@ impl Worker {
                 }
             })
         };
-        let result =
-            time::timeout(self.config.job_timeout, self.process_job(&job, worker_id)).await;
+        let cancellation_task = {
+            let pool = self.pool.clone();
+            let job_id = job.id;
+            let stop = stop_token.clone();
+            tokio::spawn(async move {
+                loop {
+                    if stop.is_cancelled() {
+                        break;
+                    }
+                    match db::is_cancel_requested(&pool, job_id).await {
+                        Ok(true) => {
+                            stop.cancel();
+                            break;
+                        }
+                        Ok(false) => time::sleep(Duration::from_secs(1)).await,
+                        Err(error) => {
+                            warn!(job_id = %job_id, error = %error, "cancellation monitor failed");
+                            time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
+                }
+            })
+        };
+        let result = time::timeout(
+            self.config.job_timeout,
+            self.process_job(&job, worker_id, stop_token.clone()),
+        )
+        .await;
         heartbeat_cancel.cancel();
+        stop_token.cancel();
         let _ = heartbeat_task.await;
+        let _ = cancellation_task.await;
+        if lease_lost.is_cancelled() {
+            warn!(job_id = %job.id, "worker lease was lost; abandoning local task");
+            return;
+        }
         match result {
             Ok(Ok(())) => info!(job_id = %job.id, "analysis job completed"),
             Ok(Err(error)) if error.code() == ErrorCode::JobCancelled => {
@@ -140,7 +179,9 @@ impl Worker {
                     return;
                 }
                 error!(job_id = %job.id, code = error.code().as_str(), "analysis job failed");
-                if let Err(mark_error) = db::mark_failed(&self.pool, job.id, &error).await {
+                if let Err(mark_error) =
+                    db::mark_failed(&self.pool, job.id, worker_id, &error).await
+                {
                     error!(job_id = %job.id, error = %mark_error, "failed to mark job failed");
                 }
             }
@@ -153,21 +194,44 @@ impl Worker {
                     ErrorCode::JobTimeout,
                     format!("任务超过 {minutes} 分钟强制超时"),
                 );
-                if let Err(mark_error) = db::mark_failed(&self.pool, job.id, &error).await {
+                if let Err(mark_error) =
+                    db::mark_failed(&self.pool, job.id, worker_id, &error).await
+                {
                     error!(job_id = %job.id, error = %mark_error, "failed to mark timeout");
                 }
             }
         }
     }
 
-    async fn process_job(&self, job: &db::ClaimedJob, worker_id: &str) -> CoreResult<()> {
-        self.check_cancel(job.id).await?;
+    async fn process_job(
+        &self,
+        job: &db::ClaimedJob,
+        worker_id: &str,
+        stop_token: CancellationToken,
+    ) -> CoreResult<()> {
+        self.check_cancel(job.id, &stop_token).await?;
         let document_record = db::load_document(&self.pool, job.document_id).await?;
-        let model_record =
-            db::load_model_profile(&self.pool, job.model_profile_id, job.user_id).await?;
-        let prompt_record = match job.prompt_version_id {
-            Some(prompt_id) => db::load_prompt(&self.pool, prompt_id).await?,
-            None => db::load_active_prompt(&self.pool).await?,
+        let job_configuration = if let Some(snapshot) = &job.model_snapshot {
+            serde_json::from_value::<db::JobConfiguration>(snapshot.clone()).map_err(|_| {
+                CoreError::public(ErrorCode::ConfigurationInvalid, "任务模型配置快照无效")
+            })?
+        } else {
+            let model_record =
+                db::load_model_profile(&self.pool, job.model_profile_id, job.user_id).await?;
+            let prompt_record = match job.prompt_version_id {
+                Some(prompt_id) => db::load_prompt(&self.pool, prompt_id).await?,
+                None => db::load_active_prompt(&self.pool).await?,
+            };
+            let configuration = db::JobConfiguration::from_records(&model_record, &prompt_record);
+            db::set_job_configuration(
+                &self.pool,
+                job.id,
+                worker_id,
+                prompt_record.id,
+                &serde_json::to_value(&configuration)?,
+            )
+            .await?;
+            configuration
         };
         let evidence = Arc::new(db::load_evidence(&self.pool).await?);
         let storage_path = document_record
@@ -187,6 +251,8 @@ impl Worker {
             + ::time::Duration::hours(self.config.failed_input_retention_hours);
         db::save_extracted_document(
             &self.pool,
+            job.id,
+            worker_id,
             document_record.id,
             &extracted.text,
             extracted.char_count,
@@ -196,38 +262,32 @@ impl Worker {
 
         let chunks = analysis::chunk_text(&extracted.text);
         analysis::require_non_empty_chunks(&chunks)?;
-        db::replace_chunks(&self.pool, job.id, &chunks).await?;
+        db::replace_chunks(&self.pool, job.id, worker_id, &chunks).await?;
 
-        let model_snapshot = json!({
-            "provider_kind": model_record.provider_kind.clone(),
-            "candidate_model": model_record.candidate_model.clone(),
-            "verifier_model": model_record.verifier_model.clone(),
-            "prompt_version": prompt_record.version.clone(),
-            "reference_profile": model_record.is_reference,
-        });
-        db::set_job_configuration(&self.pool, job.id, prompt_record.id, &model_snapshot).await?;
-
-        let api_key = decrypt_secret(&self.config.master_key, &model_record.api_key_ciphertext)?;
-        let provider_kind = ProviderKind::parse(&model_record.provider_kind)?;
+        let api_key = decrypt_secret(
+            &self.config.master_key,
+            &job_configuration.api_key_ciphertext,
+        )?;
+        let provider_kind = ProviderKind::parse(&job_configuration.provider_kind)?;
         let provider = create_provider(
             provider_kind,
             ProviderProfile {
-                base_url: model_record.base_url.clone(),
+                base_url: job_configuration.base_url.clone(),
                 api_key,
-                candidate_model: model_record.candidate_model.clone(),
-                verifier_model: model_record.verifier_model.clone(),
-                candidate_system_prompt: prompt_record.candidate_template.clone(),
-                verifier_system_prompt: prompt_record.verifier_template.clone(),
+                candidate_model: job_configuration.candidate_model.clone(),
+                verifier_model: job_configuration.verifier_model.clone(),
+                candidate_system_prompt: job_configuration.candidate_system_prompt.clone(),
+                verifier_system_prompt: job_configuration.verifier_system_prompt.clone(),
             },
         )?;
         let evidence_ids: Arc<Vec<String>> = Arc::new(evidence.keys().cloned().collect());
         let profile_semaphore = {
             let mut semaphores = self.profile_semaphores.lock().await;
             semaphores
-                .entry(model_record.id)
+                .entry(job.model_profile_id)
                 .or_insert_with(|| {
                     Arc::new(Semaphore::new(
-                        usize::try_from(model_record.max_concurrency)
+                        usize::try_from(job_configuration.max_concurrency)
                             .unwrap_or(1)
                             .clamp(1, 100),
                     ))
@@ -237,8 +297,8 @@ impl Worker {
         let mut all_issues = Vec::new();
         let total_chunks = chunks.len();
         let per_job = self.config.per_job_chunk_concurrency;
-        let confirmed_threshold = prompt_record.confirmed_threshold.clamp(0, 100) as u8;
-        let suspected_threshold = prompt_record.suspected_threshold.clamp(0, 100) as u8;
+        let confirmed_threshold = job_configuration.confirmed_threshold.clamp(0, 100) as u8;
+        let suspected_threshold = job_configuration.suspected_threshold.clamp(0, 100) as u8;
         let reusable: HashMap<i32, db::ReusableChunkOutput> =
             db::load_reusable_chunk_outputs(&self.pool, job.id)
                 .await?
@@ -297,14 +357,15 @@ impl Worker {
             let pool = self.pool.clone();
             let semaphore = self.model_semaphore.clone();
             let profile_semaphore = profile_semaphore.clone();
-            let candidate_model = model_record.candidate_model.clone();
-            let verifier_model = model_record.verifier_model.clone();
-            let provider_kind = model_record.provider_kind.clone();
+            let candidate_model = job_configuration.candidate_model.clone();
+            let verifier_model = job_configuration.verifier_model.clone();
+            let provider_kind = job_configuration.provider_kind.clone();
             let worker = self.clone();
+            let stop = stop_token.clone();
             async move {
-                worker.check_cancel(job_id).await?;
+                worker.check_cancel(job_id, &stop).await?;
                 let chunk_index = chunk.index;
-                db::mark_chunk_analyzing(&pool, job_id, chunk_index).await?;
+                db::mark_chunk_analyzing(&pool, job_id, worker_id, chunk_index).await?;
                 let result = analyze_chunk(
                     &pool,
                     job_id,
@@ -320,11 +381,13 @@ impl Worker {
                     &verifier_model,
                     confirmed_threshold,
                     suspected_threshold,
+                    stop.clone(),
+                    worker_id,
                 )
                 .await;
                 if let Err(error) = &result
                     && let Err(mark_error) =
-                        db::mark_chunk_failed(&pool, job_id, chunk_index, error).await
+                        db::mark_chunk_failed(&pool, job_id, worker_id, chunk_index, error).await
                 {
                     warn!(job_id = %job_id, chunk_index, error = %mark_error, "failed to mark chunk failed");
                 }
@@ -349,7 +412,7 @@ impl Worker {
             )
             .await?;
         }
-        self.check_cancel(job.id).await?;
+        self.check_cancel(job.id, &stop_token).await?;
         db::heartbeat(
             &self.pool,
             job.id,
@@ -382,12 +445,12 @@ impl Worker {
                 char_count: extracted.char_count as u32,
             },
             AnalysisSnapshot {
-                provider_kind: model_record.provider_kind.clone(),
-                candidate_model: model_record.candidate_model.clone(),
-                verifier_model: model_record.verifier_model.clone(),
-                prompt_version: prompt_record.version.clone(),
+                provider_kind: job_configuration.provider_kind.clone(),
+                candidate_model: job_configuration.candidate_model.clone(),
+                verifier_model: job_configuration.verifier_model.clone(),
+                prompt_version: job_configuration.prompt_version.clone(),
                 analyzer_version: ANALYZER_VERSION.to_owned(),
-                reference_profile: model_record.is_reference,
+                reference_profile: job_configuration.is_reference,
             },
             issues,
             OffsetDateTime::now_utc(),
@@ -395,9 +458,9 @@ impl Worker {
         let markdown = reporting::to_markdown(&report);
         let pdf_path = self.storage.report_pdf_path(report_id);
         let typst_path = self.storage.temporary_path(report_id, "typ");
-        self.check_cancel(job.id).await?;
+        self.check_cancel(job.id, &stop_token).await?;
         reporting::render_pdf(&report, &pdf_path, &typst_path).await?;
-        if let Err(error) = self.check_cancel(job.id).await {
+        if let Err(error) = self.check_cancel(job.id, &stop_token).await {
             if let Err(remove_error) = self.storage.remove(&pdf_path).await {
                 warn!(path = %pdf_path.display(), error = %remove_error, "failed to remove cancelled report PDF");
             }
@@ -407,6 +470,7 @@ impl Worker {
             OffsetDateTime::now_utc() + ::time::Duration::days(self.config.report_retention_days);
         let save_result = db::save_report(
             &self.pool,
+            worker_id,
             &report,
             job.user_id,
             &markdown,
@@ -424,7 +488,10 @@ impl Worker {
         Ok(())
     }
 
-    async fn check_cancel(&self, job_id: Uuid) -> CoreResult<()> {
+    async fn check_cancel(&self, job_id: Uuid, stop_token: &CancellationToken) -> CoreResult<()> {
+        if stop_token.is_cancelled() && !db::is_cancel_requested(&self.pool, job_id).await? {
+            return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+        }
         if db::is_cancel_requested(&self.pool, job_id).await? {
             return Err(CoreError::public(
                 ErrorCode::JobCancelled,
@@ -518,6 +585,8 @@ async fn analyze_chunk(
     verifier_model: &str,
     confirmed_threshold: u8,
     suspected_threshold: u8,
+    stop_token: CancellationToken,
+    worker_id: &str,
 ) -> CoreResult<Vec<Issue>> {
     let candidate_result = {
         let _profile_permit = profile_semaphore.acquire().await.map_err(|_| {
@@ -526,8 +595,17 @@ async fn analyze_chunk(
         let _permit = semaphore.acquire().await.map_err(|_| {
             CoreError::public(ErrorCode::ProviderUnavailable, "模型并发控制器已关闭")
         })?;
-        ensure_not_cancelled(pool, job_id).await?;
-        provider.candidates(&chunk.text, &evidence_ids).await?
+        ensure_not_cancelled(pool, job_id, &stop_token).await?;
+        let result = tokio::select! {
+            _ = stop_token.cancelled() => {
+                match ensure_not_cancelled(pool, job_id, &stop_token).await {
+                    Ok(()) => Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效")),
+                    Err(error) => Err(error),
+                }
+            }
+            result = provider.candidates(&chunk.text, &evidence_ids) => result,
+        };
+        result?
     };
     db::record_usage(
         pool,
@@ -563,10 +641,10 @@ async fn analyze_chunk(
         )
         .await?;
     }
-    ensure_not_cancelled(pool, job_id).await?;
+    ensure_not_cancelled(pool, job_id, &stop_token).await?;
     let candidates: Vec<CandidateIssue> = candidate_result.value.issues;
     let resolved = analysis::resolve_candidates(&chunk, candidates.clone());
-    db::mark_chunk_verifying(pool, job_id, chunk.index).await?;
+    db::mark_chunk_verifying(pool, job_id, worker_id, chunk.index).await?;
     let verification_result = {
         let _profile_permit = profile_semaphore.acquire().await.map_err(|_| {
             CoreError::public(ErrorCode::ProviderUnavailable, "模型配置并发控制器已关闭")
@@ -574,10 +652,17 @@ async fn analyze_chunk(
         let _permit = semaphore.acquire().await.map_err(|_| {
             CoreError::public(ErrorCode::ProviderUnavailable, "模型并发控制器已关闭")
         })?;
-        ensure_not_cancelled(pool, job_id).await?;
-        provider
-            .verify(&chunk.text, &candidates, &evidence_ids)
-            .await?
+        ensure_not_cancelled(pool, job_id, &stop_token).await?;
+        let result = tokio::select! {
+            _ = stop_token.cancelled() => {
+                match ensure_not_cancelled(pool, job_id, &stop_token).await {
+                    Ok(()) => Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效")),
+                    Err(error) => Err(error),
+                }
+            }
+            result = provider.verify(&chunk.text, &candidates, &evidence_ids) => result,
+        };
+        result?
     };
     db::record_usage(
         pool,
@@ -615,7 +700,15 @@ async fn analyze_chunk(
     }
     let candidate_json = serde_json::to_value(&candidates)?;
     let verifier_json = serde_json::to_value(&verification_result.value.verdicts)?;
-    db::save_chunk_outputs(pool, job_id, chunk.index, &candidate_json, &verifier_json).await?;
+    db::save_chunk_outputs(
+        pool,
+        job_id,
+        worker_id,
+        chunk.index,
+        &candidate_json,
+        &verifier_json,
+    )
+    .await?;
     analysis::finalize_issues(
         &extracted,
         resolved,
@@ -626,7 +719,14 @@ async fn analyze_chunk(
     )
 }
 
-async fn ensure_not_cancelled(pool: &PgPool, job_id: Uuid) -> CoreResult<()> {
+async fn ensure_not_cancelled(
+    pool: &PgPool,
+    job_id: Uuid,
+    stop_token: &CancellationToken,
+) -> CoreResult<()> {
+    if stop_token.is_cancelled() && !db::is_cancel_requested(pool, job_id).await? {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     if db::is_cancel_requested(pool, job_id).await? {
         return Err(CoreError::public(
             ErrorCode::JobCancelled,

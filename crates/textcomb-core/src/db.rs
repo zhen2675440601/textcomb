@@ -3,6 +3,7 @@ use crate::{
     prompts,
     provider::TokenUsage,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use std::{
@@ -21,6 +22,7 @@ pub struct ClaimedJob {
     pub document_id: Uuid,
     pub model_profile_id: Uuid,
     pub prompt_version_id: Option<Uuid>,
+    pub model_snapshot: Option<Value>,
     pub attempt_count: i32,
 }
 
@@ -62,6 +64,41 @@ pub struct PromptRecord {
     pub suspected_threshold: i16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobConfiguration {
+    pub provider_kind: String,
+    pub base_url: String,
+    pub api_key_ciphertext: Vec<u8>,
+    pub candidate_model: String,
+    pub verifier_model: String,
+    pub max_concurrency: i32,
+    pub is_reference: bool,
+    pub prompt_version: String,
+    pub candidate_system_prompt: String,
+    pub verifier_system_prompt: String,
+    pub confirmed_threshold: i16,
+    pub suspected_threshold: i16,
+}
+
+impl JobConfiguration {
+    pub fn from_records(profile: &ModelProfileRecord, prompt: &PromptRecord) -> Self {
+        Self {
+            provider_kind: profile.provider_kind.clone(),
+            base_url: profile.base_url.clone(),
+            api_key_ciphertext: profile.api_key_ciphertext.clone(),
+            candidate_model: profile.candidate_model.clone(),
+            verifier_model: profile.verifier_model.clone(),
+            max_concurrency: profile.max_concurrency,
+            is_reference: profile.is_reference,
+            prompt_version: prompt.version.clone(),
+            candidate_system_prompt: prompt.candidate_template.clone(),
+            verifier_system_prompt: prompt.verifier_template.clone(),
+            confirmed_threshold: prompt.confirmed_threshold,
+            suspected_threshold: prompt.suspected_threshold,
+        }
+    }
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ReportRecord {
     pub id: Uuid,
@@ -75,6 +112,14 @@ pub struct ReportRecord {
     pub complete: bool,
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ReportSourceRecord {
+    pub original_name: String,
+    pub document_format: String,
+    pub char_count: Option<i32>,
+    pub extracted_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,8 +206,8 @@ pub async fn claim_job(pool: &PgPool, worker_id: &str) -> CoreResult<Option<Clai
             attempt_count = attempt_count + 1
         FROM candidate
         WHERE job.id = candidate.id
-        RETURNING job.id, job.user_id, job.document_id, job.model_profile_id,
-                  job.prompt_version_id, job.attempt_count
+            RETURNING job.id, job.user_id, job.document_id, job.model_profile_id,
+                  job.prompt_version_id, job.model_snapshot, job.attempt_count
         "#,
     )
     .bind(worker_id)
@@ -189,7 +234,52 @@ pub async fn recover_expired_leases(pool: &PgPool) -> CoreResult<u64> {
     )
     .execute(pool)
     .await?;
-    Ok(result.rows_affected())
+    let mut recovered = result.rows_affected();
+    recovered += sqlx::query(
+        r#"
+        UPDATE analysis_jobs
+        SET status = 'failed',
+            stage = 'failed',
+            lease_until = NULL,
+            completed_at = now(),
+            error_code = 'JOB_TIMEOUT',
+            error_message = '任务超过允许的最长处理时间'
+        WHERE status IN ('extracting', 'analyzing', 'verifying', 'merging', 'rendering')
+          AND timeout_at <= now()
+        "#,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    recovered += sqlx::query(
+        r#"
+        WITH cancelled AS (
+            UPDATE analysis_jobs
+            SET status = 'cancelled',
+                stage = 'cancelled',
+                lease_until = NULL,
+                completed_at = now(),
+                error_code = 'JOB_CANCELLED',
+                error_message = '任务已由用户取消',
+                model_snapshot = NULL
+            WHERE status = 'cancel_requested'
+              AND (lease_until IS NULL OR lease_until < now())
+            RETURNING document_id
+        )
+        UPDATE documents AS document
+        SET extracted_text = NULL,
+            input_expires_at = CASE
+                WHEN document.storage_path IS NULL THEN NULL
+                ELSE now()
+            END
+        FROM cancelled
+        WHERE document.id = cancelled.document_id
+        "#,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(recovered)
 }
 
 pub async fn heartbeat(
@@ -295,7 +385,7 @@ pub async fn request_cancellation(
                 UPDATE analysis_jobs
                 SET status = 'cancelled', stage = 'cancelled', lease_until = NULL,
                     completed_at = now(), error_code = 'JOB_CANCELLED',
-                    error_message = '任务已由用户取消'
+                    error_message = '任务已由用户取消', model_snapshot = NULL
                 WHERE id = $1
                 "#,
             )
@@ -445,46 +535,71 @@ pub async fn load_evidence(pool: &PgPool) -> CoreResult<HashMap<String, Evidence
 
 pub async fn save_extracted_document(
     pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
     document_id: Uuid,
     text: &str,
     char_count: usize,
     expires_at: OffsetDateTime,
 ) -> CoreResult<()> {
-    sqlx::query(
-        "UPDATE documents SET extracted_text = $2, char_count = $3, input_expires_at = $4 WHERE id = $1",
+    let result = sqlx::query(
+        "UPDATE documents SET extracted_text = $3, char_count = $4, input_expires_at = $5 WHERE id = $1 AND EXISTS (SELECT 1 FROM analysis_jobs WHERE id = $2 AND document_id = $1 AND worker_id = $6 AND status IN ('extracting','analyzing','verifying','merging','rendering'))",
     )
     .bind(document_id)
+    .bind(job_id)
     .bind(text)
     .bind(char_count as i32)
     .bind(expires_at)
+    .bind(worker_id)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+    if result != 1 {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     Ok(())
 }
 
 pub async fn set_job_configuration(
     pool: &PgPool,
     job_id: Uuid,
+    worker_id: &str,
     prompt_version_id: Uuid,
     model_snapshot: &Value,
 ) -> CoreResult<()> {
-    sqlx::query(
-        "UPDATE analysis_jobs SET prompt_version_id = $2, model_snapshot = $3 WHERE id = $1",
+    let result = sqlx::query(
+        "UPDATE analysis_jobs SET prompt_version_id = $3, model_snapshot = $4 WHERE id = $1 AND worker_id = $2",
     )
     .bind(job_id)
+    .bind(worker_id)
     .bind(prompt_version_id)
     .bind(model_snapshot)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+    if result != 1 {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     Ok(())
 }
 
 pub async fn replace_chunks(
     pool: &PgPool,
     job_id: Uuid,
+    worker_id: &str,
     chunks: &[crate::analysis::AnalysisChunk],
 ) -> CoreResult<()> {
     let mut transaction = pool.begin().await?;
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM analysis_jobs WHERE id = $1 AND worker_id = $2 AND status IN ('extracting','analyzing','verifying','merging','rendering'))",
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !active {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     sqlx::query("DELETE FROM analysis_chunks WHERE job_id = $1 AND chunk_index >= $2")
         .bind(job_id)
         .bind(chunks.len() as i32)
@@ -552,10 +667,13 @@ pub async fn replace_chunks(
     .bind(job_id)
     .fetch_one(&mut *transaction)
     .await?;
-    sqlx::query("UPDATE analysis_jobs SET total_chunks = $2, completed_chunks = $3 WHERE id = $1")
+    sqlx::query(
+        "UPDATE analysis_jobs SET total_chunks = $2, completed_chunks = $3 WHERE id = $1 AND worker_id = $4",
+    )
         .bind(job_id)
         .bind(chunks.len() as i32)
         .bind(completed as i32)
+        .bind(worker_id)
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
@@ -590,35 +708,47 @@ pub async fn load_reusable_chunk_outputs(
 pub async fn mark_chunk_analyzing(
     pool: &PgPool,
     job_id: Uuid,
+    worker_id: &str,
     chunk_index: usize,
 ) -> CoreResult<()> {
-    sqlx::query(
-        "UPDATE analysis_chunks SET status = 'analyzing', error_code = NULL, updated_at = now() WHERE job_id = $1 AND chunk_index = $2",
+    let result = sqlx::query(
+        "UPDATE analysis_chunks SET status = 'analyzing', error_code = NULL, updated_at = now() WHERE job_id = $1 AND chunk_index = $2 AND EXISTS (SELECT 1 FROM analysis_jobs WHERE id = $1 AND worker_id = $3 AND status IN ('extracting','analyzing','verifying','merging','rendering'))",
     )
     .bind(job_id)
     .bind(chunk_index as i32)
+    .bind(worker_id)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+    if result != 1 {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     Ok(())
 }
 
 pub async fn mark_chunk_verifying(
     pool: &PgPool,
     job_id: Uuid,
+    worker_id: &str,
     chunk_index: usize,
 ) -> CoreResult<()> {
     let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "UPDATE analysis_chunks SET status = 'verifying', updated_at = now() WHERE job_id = $1 AND chunk_index = $2",
+    let chunk_update = sqlx::query(
+        "UPDATE analysis_chunks SET status = 'verifying', updated_at = now() WHERE job_id = $1 AND chunk_index = $2 AND EXISTS (SELECT 1 FROM analysis_jobs WHERE id = $1 AND worker_id = $3 AND status IN ('extracting','analyzing','verifying','merging','rendering'))",
     )
     .bind(job_id)
     .bind(chunk_index as i32)
+    .bind(worker_id)
     .execute(&mut *transaction)
     .await?;
+    if chunk_update.rows_affected() != 1 {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     sqlx::query(
-        "UPDATE analysis_jobs SET status = 'verifying', stage = 'verifying' WHERE id = $1 AND status IN ('analyzing','verifying')",
+        "UPDATE analysis_jobs SET status = 'verifying', stage = 'verifying' WHERE id = $1 AND worker_id = $2 AND status IN ('analyzing','verifying')",
     )
     .bind(job_id)
+    .bind(worker_id)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -628,48 +758,60 @@ pub async fn mark_chunk_verifying(
 pub async fn mark_chunk_failed(
     pool: &PgPool,
     job_id: Uuid,
+    worker_id: &str,
     chunk_index: usize,
     error: &CoreError,
 ) -> CoreResult<()> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE analysis_chunks
         SET status = 'failed', retry_count = retry_count + 1,
-            error_code = $3, updated_at = now()
-        WHERE job_id = $1 AND chunk_index = $2
+            error_code = $4, updated_at = now()
+        WHERE job_id = $1 AND chunk_index = $2 AND EXISTS (SELECT 1 FROM analysis_jobs WHERE id = $1 AND worker_id = $3 AND status IN ('extracting','analyzing','verifying','merging','rendering'))
         "#,
     )
     .bind(job_id)
     .bind(chunk_index as i32)
+    .bind(worker_id)
     .bind(error.code().as_str())
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+    if result != 1 {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     Ok(())
 }
 
 pub async fn save_chunk_outputs(
     pool: &PgPool,
     job_id: Uuid,
+    worker_id: &str,
     chunk_index: usize,
     candidate_output: &Value,
     verifier_output: &Value,
 ) -> CoreResult<()> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE analysis_chunks
         SET status = 'completed',
-            candidate_output = $3,
-            verifier_output = $4,
+            candidate_output = $4,
+            verifier_output = $5,
             updated_at = now()
-        WHERE job_id = $1 AND chunk_index = $2
+        WHERE job_id = $1 AND chunk_index = $2 AND EXISTS (SELECT 1 FROM analysis_jobs WHERE id = $1 AND worker_id = $3 AND status IN ('extracting','analyzing','verifying','merging','rendering'))
         "#,
     )
     .bind(job_id)
     .bind(chunk_index as i32)
+    .bind(worker_id)
     .bind(candidate_output)
     .bind(verifier_output)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+    if result != 1 {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
+    }
     Ok(())
 }
 
@@ -713,6 +855,7 @@ pub async fn record_usage(pool: &PgPool, record: UsageRecord<'_>) -> CoreResult<
 
 pub async fn save_report(
     pool: &PgPool,
+    worker_id: &str,
     report: &ReportV1,
     user_id: Uuid,
     markdown: &str,
@@ -722,6 +865,7 @@ pub async fn save_report(
     let mut transaction = pool.begin().await?;
     save_report_in_transaction(
         &mut transaction,
+        worker_id,
         report,
         user_id,
         markdown,
@@ -735,6 +879,7 @@ pub async fn save_report(
 
 async fn save_report_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
+    worker_id: &str,
     report: &ReportV1,
     user_id: Uuid,
     markdown: &str,
@@ -779,8 +924,7 @@ async fn save_report_in_transaction(
     sqlx::query(
         r#"
         UPDATE documents AS document
-        SET extracted_text = NULL,
-            input_expires_at = CASE
+        SET input_expires_at = CASE
                 WHEN document.storage_path IS NULL THEN NULL
                 ELSE now()
             END
@@ -795,13 +939,15 @@ async fn save_report_in_transaction(
         r#"
         UPDATE analysis_jobs
         SET status = 'completed', stage = 'completed', progress = 100,
-            report_id = $2, completed_at = now(), lease_until = NULL,
-            heartbeat_at = now(), error_code = NULL, error_message = NULL
-        WHERE id = $1
+            report_id = $3, completed_at = now(), lease_until = NULL,
+            heartbeat_at = now(), error_code = NULL, error_message = NULL,
+            model_snapshot = NULL
+        WHERE id = $1 AND worker_id = $2
           AND status IN ('analyzing', 'verifying', 'merging', 'rendering')
         "#,
     )
     .bind(report.job_id)
+    .bind(worker_id)
     .bind(report.report_id)
     .execute(&mut **transaction)
     .await?;
@@ -853,17 +999,23 @@ pub async fn confirm_document_file_removed(pool: &PgPool, path: &Path) -> CoreRe
     Ok(())
 }
 
-pub async fn mark_failed(pool: &PgPool, job_id: Uuid, error: &CoreError) -> CoreResult<()> {
+pub async fn mark_failed(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    error: &CoreError,
+) -> CoreResult<()> {
     sqlx::query(
         r#"
         UPDATE analysis_jobs
         SET status = 'failed', stage = 'failed', lease_until = NULL,
-            completed_at = now(), error_code = $2, error_message = $3
-        WHERE id = $1
+            completed_at = now(), error_code = $3, error_message = $4
+        WHERE id = $1 AND worker_id = $2
           AND status NOT IN ('cancel_requested', 'cancelled', 'completed', 'expired')
         "#,
     )
     .bind(job_id)
+    .bind(worker_id)
     .bind(error.code().as_str())
     .bind(error.safe_message().as_ref())
     .execute(pool)
@@ -890,7 +1042,7 @@ pub async fn finalize_cancelled(pool: &PgPool, job_id: Uuid) -> CoreResult<Optio
         UPDATE analysis_jobs
         SET status = 'cancelled', stage = 'cancelled', lease_until = NULL,
             completed_at = now(), error_code = 'JOB_CANCELLED',
-            error_message = '任务已由用户取消'
+            error_message = '任务已由用户取消', model_snapshot = NULL
         WHERE id = $1
         "#,
     )
@@ -946,6 +1098,28 @@ pub async fn load_report(
     .ok_or_else(|| CoreError::public(ErrorCode::NotFound, "报告不存在或已过期"))
 }
 
+pub async fn load_report_source(
+    pool: &PgPool,
+    report_id: Uuid,
+    user_id: Uuid,
+) -> CoreResult<ReportSourceRecord> {
+    sqlx::query_as::<_, ReportSourceRecord>(
+        r#"
+        SELECT document.original_name, document.document_format,
+               document.char_count, document.extracted_text
+        FROM reports
+        JOIN analysis_jobs AS job ON job.id = reports.job_id
+        JOIN documents AS document ON document.id = job.document_id
+        WHERE reports.id = $1 AND reports.user_id = $2 AND reports.expires_at > now()
+        "#,
+    )
+    .bind(report_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| CoreError::public(ErrorCode::NotFound, "报告不存在或已过期"))
+}
+
 pub async fn cleanup_expired(pool: &PgPool) -> CoreResult<Vec<CleanupTarget>> {
     let paths: Vec<Option<String>> = sqlx::query_scalar(
         r#"
@@ -965,14 +1139,6 @@ pub async fn cleanup_expired(pool: &PgPool) -> CoreResult<Vec<CleanupTarget>> {
         WHERE chunk.job_id = job.id
           AND document.input_expires_at IS NOT NULL
           AND document.input_expires_at < now()
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE documents SET extracted_text = NULL
-        WHERE input_expires_at IS NOT NULL AND input_expires_at < now()
         "#,
     )
     .execute(pool)
@@ -1007,10 +1173,33 @@ pub async fn confirm_cleanup_target(pool: &PgPool, target: &CleanupTarget) -> Co
     match target {
         CleanupTarget::Document(path) => confirm_document_file_removed(pool, path).await,
         CleanupTarget::Report { id, .. } => {
-            sqlx::query("DELETE FROM reports WHERE id = $1 AND expires_at < now()")
-                .bind(id)
-                .execute(pool)
-                .await?;
+            let mut transaction = pool.begin().await?;
+            sqlx::query(
+                r#"
+                WITH deleted AS (
+                    DELETE FROM reports WHERE id = $1 AND expires_at < now()
+                    RETURNING job_id
+                ), source_document AS (
+                    SELECT job.document_id
+                    FROM analysis_jobs AS job
+                    JOIN deleted ON deleted.job_id = job.id
+                )
+                UPDATE documents AS document
+                SET extracted_text = NULL
+                WHERE document.id IN (SELECT document_id FROM source_document)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM reports AS remaining
+                    JOIN analysis_jobs AS remaining_job ON remaining_job.id = remaining.job_id
+                    WHERE remaining_job.document_id = document.id
+                      AND remaining.expires_at > now()
+                  )
+                "#,
+            )
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
             Ok(())
         }
     }

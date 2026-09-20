@@ -80,12 +80,21 @@ export type FeedbackVerdict = "correct" | "incorrect" | "disputed";
 export type GrammarSubtype =
   | "word_order"
   | "collocation"
+  | "missing_component"
+  | "redundant_component"
   | "missing_or_redundant_component"
   | "mixed_structure"
   | "ambiguity"
   | "illogical"
   | "conjunction"
   | "word_misuse";
+
+export interface ReportSource {
+  original_name: string;
+  document_format: DocumentFormat;
+  char_count: number;
+  text: string;
+}
 
 export interface SourceLocation {
   document_format: DocumentFormat;

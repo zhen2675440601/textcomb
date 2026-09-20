@@ -19,8 +19,8 @@
 - 直接粘贴正文、TXT、DOCX、文字型 PDF 解析和来源定位；扫描版 PDF 直接拒绝。
 - PostgreSQL 任务队列、租约恢复、异步进度、取消和失败块重试。
 - 双轮 AI 候选/复核、问题分层、位置校验、去重和 ReportV1。
-- 在线报告、JSON、Markdown、PDF 导出和逐条反馈。
-- 报告追溯内置提示词版本 `zh-cn-proofread-v1`；提示词管理页面和接口尚未实现。
+- 在线报告、与问题位置关联的分析原文、JSON、Markdown、PDF 导出和逐条反馈。
+- 报告追溯内置提示词版本 `zh-cn-proofread-v3`；提示词管理页面和接口尚未实现。
 - Docker Compose、开发文档、假模型、评测工具、测试样例和负载脚本。
 - 仓库根目录 `AGENTS.md`，用于不同主机上的 Codex 共享开发规则。
 

@@ -34,7 +34,6 @@ pub struct ResolvedCandidate {
     pub reason: String,
     pub suggestion: String,
     pub candidate_confidence: u8,
-    pub evidence_source_ids: Vec<String>,
     pub protected: bool,
 }
 
@@ -53,9 +52,12 @@ pub fn chunk_text(text: &str) -> Vec<AnalysisChunk> {
             }
             let mut cursor = paragraph_start;
             while cursor < paragraph_end {
-                let end = (cursor + HARD_CHUNK_CHARS).min(paragraph_end);
+                let end = split_long_paragraph(text, cursor, paragraph_end);
                 push_chunk(&mut chunks, text, cursor, end);
-                cursor = end;
+                if end >= paragraph_end {
+                    break;
+                }
+                cursor = end.saturating_sub(MAX_OVERLAP_CHARS).max(cursor + 1);
             }
             previous_paragraph = Some((paragraph_start, paragraph_end));
             current_end = paragraph_end;
@@ -68,7 +70,10 @@ pub fn chunk_text(text: &str) -> Vec<AnalysisChunk> {
             let start = current_start.take().expect("checked above");
             push_chunk(&mut chunks, text, start, current_end);
             let overlap_start = previous_paragraph
-                .filter(|(start, end)| end.saturating_sub(*start) <= MAX_OVERLAP_CHARS)
+                .filter(|(start, end)| {
+                    end.saturating_sub(*start) <= MAX_OVERLAP_CHARS
+                        && paragraph_end.saturating_sub(*start) <= HARD_CHUNK_CHARS
+                })
                 .map(|(start, _)| start)
                 .unwrap_or(paragraph_start);
             current_start = Some(overlap_start);
@@ -88,6 +93,24 @@ pub fn chunk_text(text: &str) -> Vec<AnalysisChunk> {
         chunk.index = index;
     }
     chunks
+}
+
+fn split_long_paragraph(text: &str, start: usize, end: usize) -> usize {
+    let hard_end = (start + HARD_CHUNK_CHARS).min(end);
+    if hard_end == end {
+        return end;
+    }
+    let window: Vec<char> = text.chars().skip(start).take(hard_end - start).collect();
+    let search_start = window.len().saturating_sub(MAX_OVERLAP_CHARS);
+    window
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(index, character)| {
+            *index >= search_start
+                && matches!(**character, '。' | '！' | '？' | '!' | '?' | '；' | ';')
+        })
+        .map_or(hard_end, |(index, _)| start + index + 1)
 }
 
 fn paragraph_ranges(text: &str) -> Vec<(usize, usize)> {
@@ -161,7 +184,6 @@ pub fn resolve_candidates(
                 reason: candidate.reason,
                 suggestion: candidate.suggestion,
                 candidate_confidence: candidate.confidence.min(100),
-                evidence_source_ids: candidate.evidence_source_ids,
                 protected: overlaps_protected_span(
                     &chunk.text,
                     local_start,
@@ -256,26 +278,29 @@ pub fn finalize_issues(
         else {
             continue;
         };
+        let effective_confidence = candidate.candidate_confidence.min(verdict.confidence);
         if verdict.verdict == VerificationVerdict::Rejected
-            || verdict.confidence < suspected_threshold
+            || effective_confidence < suspected_threshold
         {
             continue;
         }
-        let mut level = if verdict.confidence >= confirmed_threshold
+        let mut level = if effective_confidence >= confirmed_threshold
             && verdict.verdict == VerificationVerdict::Confirmed
         {
             IssueLevel::Confirmed
         } else {
             IssueLevel::Suspected
         };
-        if candidate.category == IssueCategory::Paragraph || candidate.protected {
+        if candidate.category == IssueCategory::Paragraph
+            || candidate.protected
+            || requires_contextual_review(candidate)
+        {
             level = IssueLevel::Suspected;
         }
         let mut seen_sources = HashSet::new();
         let evidence_refs = verdict
             .evidence_source_ids
             .iter()
-            .chain(candidate.evidence_source_ids.iter())
             .filter_map(|source_id| {
                 if seen_sources.insert(source_id.clone()) {
                     evidence.get(source_id).cloned()
@@ -306,12 +331,24 @@ pub fn finalize_issues(
             } else {
                 verdict.suggestion
             },
-            confidence: verdict.confidence.min(100),
+            confidence: effective_confidence.min(100),
             evidence_refs,
             feedback: None,
         });
     }
     Ok(deduplicate_issues(issues))
+}
+
+/// These diagnoses often depend on intent or discourse outside the sentence.
+/// Keep them reviewable without presenting an AI inference as a mandatory edit.
+fn requires_contextual_review(candidate: &ResolvedCandidate) -> bool {
+    candidate.category == IssueCategory::Grammar
+        && matches!(
+            candidate.grammar_subtype,
+            Some(
+                GrammarSubtype::Ambiguity | GrammarSubtype::Illogical | GrammarSubtype::WordMisuse
+            )
+        )
 }
 
 pub fn deduplicate_issues(mut issues: Vec<Issue>) -> Vec<Issue> {
@@ -378,9 +415,73 @@ mod tests {
     }
 
     #[test]
+    fn long_paragraph_chunks_keep_hard_limit_and_context_overlap() {
+        let text = format!("{}。{}", "中".repeat(4_200), "后文");
+        let chunks = chunk_text(&text);
+        assert!(chunks.len() >= 2);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.text.chars().count() <= HARD_CHUNK_CHARS)
+        );
+        assert!(
+            chunks
+                .windows(2)
+                .all(|pair| pair[0].source_end > pair[1].source_start)
+        );
+        assert_eq!(chunks.last().unwrap().source_end, text.chars().count());
+    }
+
+    #[test]
     fn duplicate_quote_requires_context() {
         let text = "他说很好。她也说很好。";
         assert!(locate_unique(text, "很好", None, None).is_none());
         assert_eq!(locate_unique(text, "很好", Some("他说"), None), Some(2));
+    }
+
+    #[test]
+    fn contextual_grammar_diagnoses_remain_suspected() {
+        let document = ExtractedDocument {
+            format: textcomb_domain::DocumentFormat::Txt,
+            text: "这个人谁也不认识。".to_owned(),
+            segments: vec![crate::documents::SourceSegment {
+                char_start: 0,
+                char_end: 9,
+                page: None,
+                line: Some(1),
+                paragraph_index: 0,
+            }],
+            char_count: 9,
+        };
+        let candidate = ResolvedCandidate {
+            candidate_index: 0,
+            source_start: 0,
+            source_end: 2,
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Ambiguity),
+            quote: "这个".to_owned(),
+            reason: "缺少上下文".to_owned(),
+            suggestion: "补充指代对象".to_owned(),
+            candidate_confidence: 100,
+            protected: false,
+        };
+        let issues = finalize_issues(
+            &document,
+            vec![candidate],
+            vec![VerifiedCandidate {
+                candidate_index: 0,
+                verdict: VerificationVerdict::Confirmed,
+                confidence: 100,
+                reason: "上下文不足以排除其他读法".to_owned(),
+                suggestion: "补充指代对象".to_owned(),
+                evidence_source_ids: Vec::new(),
+            }],
+            &HashMap::new(),
+            80,
+            50,
+        )
+        .unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].level, IssueLevel::Suspected);
     }
 }

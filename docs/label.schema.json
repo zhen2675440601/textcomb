@@ -24,6 +24,8 @@
             "enum": [
               "word_order",
               "collocation",
+              "missing_component",
+              "redundant_component",
               "missing_or_redundant_component",
               "mixed_structure",
               "ambiguity",

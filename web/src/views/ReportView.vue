@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api, ApiProblem } from "@/api/client";
 import type {
@@ -8,6 +8,7 @@ import type {
   IssueCategory,
   IssueLevel,
   Report,
+  ReportSource,
 } from "@/api/types";
 
 const route = useRoute();
@@ -21,6 +22,11 @@ const feedbackFilter = ref<"all" | "unreviewed" | FeedbackVerdict>("all");
 const minimumConfidence = ref(50);
 const expanded = ref<Set<string>>(new Set());
 const sendingFeedback = ref<string | null>(null);
+const sourceOpen = ref(false);
+const sourceLoading = ref(false);
+const sourceError = ref("");
+const source = ref<ReportSource | null>(null);
+const selectedIssueId = ref<string | null>(null);
 
 const reportId = String(route.params.id);
 
@@ -34,8 +40,10 @@ const categoryLabels: Record<IssueCategory, string> = {
 const subtypeLabels: Record<string, string> = {
   word_order: "语序不当",
   collocation: "搭配不当",
+  missing_component: "成分残缺",
+  redundant_component: "成分赘余",
   missing_or_redundant_component: "成分残缺或赘余",
-  mixed_structure: "结构混乱",
+  mixed_structure: "句式杂糅",
   ambiguity: "表意不明",
   illogical: "不合逻辑",
   conjunction: "关联词使用不当",
@@ -59,13 +67,31 @@ const visibleIssues = computed(() => {
   });
 });
 
+const sourceSelection = computed(() => {
+  if (!source.value) return null;
+  const issue = report.value?.issues.find((item) => item.id === selectedIssueId.value);
+  if (!issue) return { before: source.value.text, selected: "", after: "" };
+
+  const chars = Array.from(source.value.text);
+  const start = Math.min(Math.max(issue.location.char_start, 0), chars.length);
+  const end = Math.min(Math.max(issue.location.char_end, start), chars.length);
+  return {
+    before: chars.slice(0, start).join(""),
+    selected: chars.slice(start, end).join(""),
+    after: chars.slice(end).join(""),
+  };
+});
+
 async function load() {
   loading.value = true;
   error.value = "";
   try {
     report.value = await api.report(reportId);
     const first = report.value.issues[0];
-    if (first) expanded.value.add(first.id);
+    if (first) {
+      expanded.value.add(first.id);
+      selectedIssueId.value = first.id;
+    }
   } catch (cause) {
     error.value = cause instanceof ApiProblem ? cause.message : "无法读取问题报告";
   } finally {
@@ -73,12 +99,50 @@ async function load() {
   }
 }
 
-function toggle(issueId: string) {
+function toggle(issue: Issue) {
+  selectedIssueId.value = issue.id;
   const next = new Set(expanded.value);
-  if (next.has(issueId)) next.delete(issueId);
-  else next.add(issueId);
+  if (next.has(issue.id)) next.delete(issue.id);
+  else next.add(issue.id);
   expanded.value = next;
 }
+
+async function openSource(issue?: Issue) {
+  if (issue) selectedIssueId.value = issue.id;
+  sourceOpen.value = true;
+  if (source.value || sourceLoading.value) return;
+
+  sourceLoading.value = true;
+  sourceError.value = "";
+  try {
+    source.value = await api.reportSource(reportId);
+  } catch (cause) {
+    sourceError.value = cause instanceof ApiProblem ? cause.message : "无法读取分析原文";
+  } finally {
+    sourceLoading.value = false;
+  }
+}
+
+function toggleSource() {
+  if (sourceOpen.value) {
+    sourceOpen.value = false;
+    return;
+  }
+  void openSource();
+}
+
+function scrollToSelectedSource() {
+  document.getElementById("report-source-selection")?.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+}
+
+watch([sourceOpen, source, selectedIssueId], () => {
+  if (sourceOpen.value && source.value && sourceSelection.value?.selected) {
+    void nextTick(scrollToSelectedSource);
+  }
+});
 
 function locationLabel(issue: Issue) {
   const location = issue.location;
@@ -118,7 +182,7 @@ async function setFeedback(issue: Issue, verdict: FeedbackVerdict) {
 }
 
 async function removeReport() {
-  if (!window.confirm("确定永久删除这份报告吗？问题片段和 PDF 将不可恢复。")) return;
+  if (!window.confirm("确定永久删除这份报告吗？分析原文、问题片段和 PDF 将不可恢复。")) return;
   try {
     await api.deleteReport(reportId);
     await router.replace("/analyses");
@@ -164,6 +228,9 @@ onMounted(load);
             <a :href="`/api/v1/reports/${report.report_id}/export/md`">Markdown</a>
             <a :href="`/api/v1/reports/${report.report_id}/export/pdf`">PDF</a>
           </div>
+          <button class="button quiet compact" type="button" @click="toggleSource">
+            {{ sourceOpen ? "收起原文" : "查看原文" }}
+          </button>
           <button class="button danger quiet compact" type="button" @click="removeReport">
             删除
           </button>
@@ -198,7 +265,7 @@ onMounted(load);
         </article>
       </div>
 
-      <div class="report-workspace">
+      <div class="report-workspace" :class="{ 'with-source': sourceOpen }">
         <aside class="filter-panel card">
           <div>
             <h3>筛选问题</h3>
@@ -268,7 +335,7 @@ onMounted(load);
             :data-category="issue.category"
             :class="{ expanded: expanded.has(issue.id) }"
           >
-            <button class="issue-summary" type="button" @click="toggle(issue.id)">
+            <button class="issue-summary" type="button" @click="toggle(issue)">
               <span class="issue-number">{{ String(index + 1).padStart(2, "0") }}</span>
               <span class="issue-main">
                 <span class="issue-labels">
@@ -311,6 +378,12 @@ onMounted(load);
                   {{ evidence.title }}（{{ evidence.revision }}）
                 </a>
               </div>
+              <div class="source-action-row">
+                <button class="text-button" type="button" @click="openSource(issue)">
+                  在分析原文中定位
+                </button>
+                <span>{{ locationLabel(issue) }}</span>
+              </div>
               <div class="feedback-row">
                 <span>这条判断是否有帮助？</span>
                 <div>
@@ -349,6 +422,28 @@ onMounted(load);
             <p>调整左侧筛选条件，查看其他分析结果。</p>
           </div>
         </div>
+
+        <aside v-if="sourceOpen" class="source-panel card">
+          <header class="source-panel-header">
+            <div>
+              <p class="eyebrow">ANALYSIS SOURCE</p>
+              <h3>分析原文</h3>
+            </div>
+            <button class="icon-button" type="button" aria-label="收起原文" @click="sourceOpen = false">
+              ×
+            </button>
+          </header>
+          <p class="source-panel-note">显示用于定位问题的提取正文；DOCX 和 PDF 保留文字内容，不保留原始排版。</p>
+          <div v-if="sourceLoading" class="inline-loading"><span class="spinner" /> 正在读取原文…</div>
+          <div v-else-if="sourceError" class="source-unavailable">
+            <strong>原文暂不可查看</strong>
+            <p>{{ sourceError }}</p>
+          </div>
+          <div v-else-if="source" class="source-scroll">
+            <p class="source-meta">{{ source.original_name }} · {{ source.char_count.toLocaleString("zh-CN") }} 字符</p>
+            <pre class="source-text"><template v-if="sourceSelection?.selected">{{ sourceSelection.before }}<mark id="report-source-selection">{{ sourceSelection.selected }}</mark>{{ sourceSelection.after }}</template><template v-else>{{ source.text }}</template></pre>
+          </div>
+        </aside>
       </div>
 
       <p class="report-disclaimer">

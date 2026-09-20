@@ -277,7 +277,7 @@ onMounted(loadProfiles);
       <ul>
         <li><span>字</span><div><strong>错字</strong><small>疑似错别字与不规范字</small></div></li>
         <li><span>，</span><div><strong>标点</strong><small>用法、位置与全半角问题</small></div></li>
-        <li><span>句</span><div><strong>八类病句</strong><small>语序、搭配、成分、结构等</small></div></li>
+        <li><span>句</span><div><strong>病句辅助</strong><small>先判断句子关系，再提示成分、搭配、语序与逻辑问题</small></div></li>
         <li><span>¶</span><div><strong>分段建议</strong><small>主题变化未分段，仅作疑似提醒</small></div></li>
       </ul>
       <div class="privacy-note">

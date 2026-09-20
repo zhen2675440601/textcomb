@@ -106,6 +106,12 @@ fn parse_document_xml(xml: &[u8]) -> CoreResult<ExtractedDocument> {
                 })?;
                 paragraph.push_str(&value);
             }
+            Ok(Event::GeneralRef(event)) if in_paragraph && in_text && deleted_depth == 0 => {
+                let name = event.decode().map_err(|_| {
+                    CoreError::public(ErrorCode::ExtractionFailed, "DOCX 实体引用编码无效")
+                })?;
+                paragraph.push_str(&decode_general_reference(&name));
+            }
             Ok(Event::Eof) => break,
             Ok(_) => {}
             Err(_) => {
@@ -140,6 +146,34 @@ fn is_tag(name: &[u8], local: &[u8]) -> bool {
     name == local || name.strip_prefix(b"w:") == Some(local)
 }
 
+fn decode_general_reference(name: &str) -> String {
+    let decoded = match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        value
+            if value
+                .strip_prefix("#x")
+                .or_else(|| value.strip_prefix("#X"))
+                .is_some() =>
+        {
+            value
+                .strip_prefix("#x")
+                .or_else(|| value.strip_prefix("#X"))
+                .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+                .and_then(char::from_u32)
+        }
+        value if value.starts_with('#') => value
+            .strip_prefix('#')
+            .and_then(|digits| digits.parse::<u32>().ok())
+            .and_then(char::from_u32),
+        _ => None,
+    };
+    decoded.map_or_else(|| format!("&{name};"), |character| character.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +188,16 @@ mod tests {
         "#;
         let document = parse_document_xml(xml.as_bytes()).unwrap();
         assert_eq!(document.text, "第一段\n\n保留");
+    }
+
+    #[test]
+    fn decodes_xml_entities_without_losing_source_characters() {
+        let xml = r#"
+            <w:document xmlns:w="x"><w:body>
+              <w:p><w:r><w:t>A&amp;B&#x4e2d;&#25991;</w:t></w:r></w:p>
+            </w:body></w:document>
+        "#;
+        let document = parse_document_xml(xml.as_bytes()).unwrap();
+        assert_eq!(document.text, "A&B中文");
     }
 }

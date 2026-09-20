@@ -82,6 +82,9 @@ string_enum!(IssueCategory {
 string_enum!(GrammarSubtype {
     WordOrder => "word_order",
     Collocation => "collocation",
+    MissingComponent => "missing_component",
+    RedundantComponent => "redundant_component",
+    // 保留旧报告的兼容值；新任务不再生成此笼统分类。
     MissingOrRedundantComponent => "missing_or_redundant_component",
     MixedStructure => "mixed_structure",
     Ambiguity => "ambiguity",

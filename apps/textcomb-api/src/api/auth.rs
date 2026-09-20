@@ -12,7 +12,7 @@ use axum::{
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use textcomb_core::auth;
 
 pub fn router() -> Router<AppState> {
@@ -58,7 +58,7 @@ pub async fn login(
         &state.pool,
         input.username.trim(),
         &SecretString::from(input.password),
-        Some(address.ip()),
+        Some(client_ip(address, &headers)),
         user_agent,
         state.config.session_ttl,
     )
@@ -83,6 +83,23 @@ pub async fn login(
         Json(UserResponse::from(user)),
     )
         .into_response())
+}
+
+fn client_ip(address: SocketAddr, headers: &HeaderMap) -> IpAddr {
+    let trusted_proxy = match address.ip() {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unicast_link_local(),
+    };
+    if trusted_proxy
+        && let Some(forwarded) = headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.trim().parse().ok())
+    {
+        return forwarded;
+    }
+    address.ip()
 }
 
 pub async fn logout(
@@ -114,4 +131,32 @@ pub async fn logout(
 
 pub async fn me(AuthUser(user): AuthUser) -> Json<UserResponse> {
     Json(UserResponse::from(user))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn login_rate_limit_uses_forwarded_client_ip_behind_private_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.8, 10.0.0.2"),
+        );
+        let address = SocketAddr::from(([10, 0, 0, 2], 8080));
+        assert_eq!(
+            client_ip(address, &headers),
+            "203.0.113.8".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn direct_public_connection_cannot_spoof_forwarded_client_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.8"));
+        let address = SocketAddr::from(([198, 51, 100, 4], 8080));
+        assert_eq!(client_ip(address, &headers), address.ip());
+    }
 }

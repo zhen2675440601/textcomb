@@ -196,6 +196,19 @@ async fn specification() -> Json<Value> {
                     "responses": { "204": { "description": "已删除" } }
                 }
             },
+            "/reports/{id}/source": {
+                "get": {
+                    "tags": ["reports"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "responses": {
+                        "200": {
+                            "description": "与报告位置对应的提取正文",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReportSource" } } }
+                        },
+                        "404": { "$ref": "#/components/responses/Problem" }
+                    }
+                }
+            },
             "/reports/{id}/export/{format}": {
                 "get": {
                     "tags": ["reports"],
@@ -217,11 +230,11 @@ async fn specification() -> Json<Value> {
                     "parameters": [
                         { "$ref": "#/components/parameters/UuidId" },
                         { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1 } },
-                        { "name": "per_page", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100 } },
+                        { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100 } },
                         { "name": "category", "in": "query", "schema": { "type": "string", "enum": ["typo", "punctuation", "grammar", "paragraph"] } },
                         { "name": "level", "in": "query", "schema": { "type": "string", "enum": ["confirmed", "suspected"] } },
                         { "name": "min_confidence", "in": "query", "schema": { "type": "integer", "minimum": 0, "maximum": 100 } },
-                        { "name": "feedback", "in": "query", "schema": { "type": "string", "enum": ["correct", "incorrect", "disputed", "none"] } }
+                        { "name": "feedback", "in": "query", "schema": { "type": "string", "enum": ["correct", "incorrect", "disputed", "unreviewed"] } }
                     ],
                     "responses": { "200": { "description": "筛选和分页后的问题列表" } }
                 }
@@ -510,6 +523,16 @@ async fn specification() -> Json<Value> {
                         "generated_at": { "type": "string", "format": "date-time" }
                     }
                 },
+                "ReportSource": {
+                    "type": "object",
+                    "required": ["original_name", "document_format", "char_count", "text"],
+                    "properties": {
+                        "original_name": { "type": "string" },
+                        "document_format": { "type": "string", "enum": ["txt", "docx", "pdf"] },
+                        "char_count": { "type": "integer", "minimum": 0 },
+                        "text": { "type": "string" }
+                    }
+                },
                 "Issue": {
                     "type": "object",
                     "required": [
@@ -525,7 +548,8 @@ async fn specification() -> Json<Value> {
                         "grammar_subtype": {
                             "type": ["string", "null"],
                             "enum": [
-                                "word_order", "collocation", "missing_or_redundant_component",
+                                "word_order", "collocation", "missing_component", "redundant_component",
+                                "missing_or_redundant_component",
                                 "mixed_structure", "ambiguity", "illogical", "conjunction",
                                 "word_misuse", null
                             ]

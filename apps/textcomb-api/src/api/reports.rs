@@ -18,10 +18,43 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/reports/{id}/source", get(get_source))
         .route("/reports/{id}", get(get_report).delete(delete_report))
         .route("/reports/{id}/issues", get(list_issues))
         .route("/reports/{id}/export/{format}", get(export))
         .route("/issues/{id}/feedback", post(feedback))
+}
+
+#[derive(Debug, Serialize)]
+struct ReportSourceResponse {
+    original_name: String,
+    document_format: String,
+    char_count: u32,
+    text: String,
+}
+
+async fn get_source(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(report_id): Path<Uuid>,
+) -> ApiResult<Json<ReportSourceResponse>> {
+    let source = db::load_report_source(&state.pool, report_id, user.id).await?;
+    let text = source.extracted_text.ok_or_else(|| {
+        ApiError(CoreError::public(
+            ErrorCode::NotFound,
+            "这份历史报告的分析原文已按旧策略清理；请重新分析后查看",
+        ))
+    })?;
+    let char_count = source
+        .char_count
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or_else(|| u32::try_from(text.chars().count()).unwrap_or(u32::MAX));
+    Ok(Json(ReportSourceResponse {
+        original_name: source.original_name,
+        document_format: source.document_format,
+        char_count,
+        text,
+    }))
 }
 
 async fn get_report(
@@ -40,7 +73,20 @@ async fn load_enriched_report(
     report_id: Uuid,
 ) -> ApiResult<ReportV1> {
     let record = db::load_report(&state.pool, report_id, user_id).await?;
-    let mut report: ReportV1 = serde_json::from_value(record.content_json)?;
+    let mut report: ReportV1 = match serde_json::from_value(record.content_json) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::error!(
+                report_id = %report_id,
+                error = %error,
+                "stored report JSON does not match ReportV1"
+            );
+            return Err(ApiError(CoreError::public(
+                ErrorCode::ModelOutputInvalid,
+                "报告数据无法解析，请重新分析文章",
+            )));
+        }
+    };
     let feedback: Vec<(Uuid, String)> = sqlx::query_as(
         r#"
         SELECT issue_feedback.issue_id, issue_feedback.verdict
@@ -242,20 +288,30 @@ async fn delete_report(
     Path(report_id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
     let mut transaction = state.pool.begin().await?;
-    let report: Option<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT job_id, pdf_path FROM reports WHERE id = $1 AND user_id = $2 FOR UPDATE",
+    let report: Option<(Uuid, Uuid, Option<String>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT reports.job_id, analysis_jobs.document_id, reports.pdf_path, documents.storage_path
+        FROM reports
+        JOIN analysis_jobs ON analysis_jobs.id = reports.job_id
+        JOIN documents ON documents.id = analysis_jobs.document_id
+        WHERE reports.id = $1 AND reports.user_id = $2
+        FOR UPDATE OF reports, analysis_jobs, documents
+        "#,
     )
     .bind(report_id)
     .bind(user.id)
     .fetch_optional(&mut *transaction)
     .await?;
-    let Some((job_id, path)) = report else {
+    let Some((job_id, document_id, pdf_path, input_path)) = report else {
         return Err(ApiError(CoreError::public(
             ErrorCode::NotFound,
             "报告不存在",
         )));
     };
-    if let Some(path) = path.as_deref() {
+    if let Some(path) = pdf_path.as_deref() {
+        state.storage.remove(FilePath::new(path)).await?;
+    }
+    if let Some(path) = input_path.as_deref() {
         state.storage.remove(FilePath::new(path)).await?;
     }
     sqlx::query("DELETE FROM reports WHERE id = $1 AND user_id = $2")
@@ -267,6 +323,17 @@ async fn delete_report(
         "UPDATE analysis_jobs SET status = 'expired', stage = 'expired', report_id = NULL WHERE id = $1 AND user_id = $2",
     )
     .bind(job_id)
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE documents
+        SET extracted_text = NULL, storage_path = NULL, input_expires_at = NULL
+        WHERE id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(document_id)
     .bind(user.id)
     .execute(&mut *transaction)
     .await?;

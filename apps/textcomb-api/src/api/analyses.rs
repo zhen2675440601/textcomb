@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, time::Duration};
-use textcomb_core::{CoreError, ErrorCode};
+use textcomb_core::{CoreError, ErrorCode, db};
 use textcomb_domain::ANALYZER_VERSION;
 use time::OffsetDateTime;
 use tracing::warn;
@@ -127,6 +127,12 @@ async fn create(
             "模型配置不存在或已停用",
         )));
     }
+    let model_record = db::load_model_profile(&state.pool, input.model_profile_id, user.id).await?;
+    let prompt_record = db::load_active_prompt(&state.pool).await?;
+    let model_snapshot = serde_json::to_value(db::JobConfiguration::from_records(
+        &model_record,
+        &prompt_record,
+    ))?;
     let job_id = Uuid::new_v4();
     let timeout_at = OffsetDateTime::now_utc()
         + time::Duration::seconds(state.config.job_timeout.as_secs() as i64);
@@ -134,8 +140,8 @@ async fn create(
         r#"
         INSERT INTO analysis_jobs(
             id, user_id, document_id, model_profile_id, status,
-            idempotency_key, analyzer_version, timeout_at
-        ) VALUES($1,$2,$3,$4,'queued',$5,$6,$7)
+            prompt_version_id, model_snapshot, idempotency_key, analyzer_version, timeout_at
+        ) VALUES($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9)
         RETURNING id, document_id, model_profile_id, status, stage, progress,
                   total_chunks, completed_chunks, error_code, error_message,
                   report_id, created_at, started_at, completed_at
@@ -145,6 +151,8 @@ async fn create(
     .bind(user.id)
     .bind(input.document_id)
     .bind(input.model_profile_id)
+    .bind(prompt_record.id)
+    .bind(model_snapshot)
     .bind(idempotency_key.as_deref())
     .bind(ANALYZER_VERSION)
     .bind(timeout_at)

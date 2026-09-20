@@ -8,6 +8,7 @@ import type {
   ProviderKind,
   ProblemDetails,
   Report,
+  ReportSource,
   User,
 } from "./types";
 
@@ -102,6 +103,7 @@ export const api = {
     }),
 
   report: (id: string) => request<Report>(`/reports/${id}`),
+  reportSource: (id: string) => request<ReportSource>(`/reports/${id}/source`),
   deleteReport: (id: string) =>
     request<void>(`/reports/${id}`, { method: "DELETE" }),
   feedback: (issueId: string, verdict: FeedbackVerdict, note?: string) =>

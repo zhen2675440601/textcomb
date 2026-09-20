@@ -24,7 +24,7 @@ function candidateIssues(text) {
       needle: "通过这次学习，使",
       issue: {
         category: "grammar",
-        grammar_subtype: "missing_or_redundant_component",
+        grammar_subtype: "missing_component",
         quote: "通过这次学习，使",
         context_before: "",
         context_after: "",

@@ -927,11 +927,11 @@ export interface paths {
             parameters: {
                 query?: {
                     page?: number;
-                    per_page?: number;
+                    page_size?: number;
                     category?: "typo" | "punctuation" | "grammar" | "paragraph";
                     level?: "confirmed" | "suspected";
                     min_confidence?: number;
-                    feedback?: "correct" | "incorrect" | "disputed" | "none";
+                    feedback?: "correct" | "incorrect" | "disputed" | "unreviewed";
                 };
                 header?: never;
                 path: {
@@ -948,6 +948,44 @@ export interface paths {
                     };
                     content?: never;
                 };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/reports/{id}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["UuidId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description 与报告位置对应的提取正文 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReportSource"];
+                    };
+                };
+                404: components["responses"]["Problem"];
             };
         };
         put?: never;
@@ -1008,7 +1046,7 @@ export interface components {
             /** @enum {string|null} */
             feedback?: "correct" | "incorrect" | "disputed" | null;
             /** @enum {string|null} */
-            grammar_subtype?: "word_order" | "collocation" | "missing_or_redundant_component" | "mixed_structure" | "ambiguity" | "illogical" | "conjunction" | "word_misuse" | null;
+            grammar_subtype?: "word_order" | "collocation" | "missing_component" | "redundant_component" | "missing_or_redundant_component" | "mixed_structure" | "ambiguity" | "illogical" | "conjunction" | "word_misuse" | null;
             /** Format: uuid */
             id: string;
             /** @enum {string} */
@@ -1043,6 +1081,13 @@ export interface components {
             title: string;
             /** Format: uri */
             type: string;
+        };
+        ReportSource: {
+            char_count: number;
+            /** @enum {string} */
+            document_format: "txt" | "docx" | "pdf";
+            original_name: string;
+            text: string;
         };
         ReportV1: {
             analysis: Record<string, never>;
