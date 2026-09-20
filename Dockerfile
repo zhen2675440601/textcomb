@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.85-bookworm AS rust-source
+FROM rust:1.97-bookworm AS rust-source
 ENV PATH="/usr/local/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin:${PATH}"
 WORKDIR /src
 RUN rustup toolchain install 1.97.1 --profile minimal && \
