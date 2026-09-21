@@ -2,11 +2,11 @@
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api, ApiProblem, uploadDocument } from "@/api/client";
-import type { DocumentRecord, ModelProfile } from "@/api/types";
+import type { AnalysisProfile, DocumentRecord, ModelProfile } from "@/api/types";
 
 type SourceMode = "file" | "text";
 
-const MAX_TEXT_CHARS = 50_000;
+const MAX_TEXT_CHARS = 200_000;
 const router = useRouter();
 const input = ref<HTMLInputElement>();
 const selectedFile = ref<File | null>(null);
@@ -14,6 +14,7 @@ const sourceMode = ref<SourceMode>("file");
 const pastedText = ref("");
 const profiles = ref<ModelProfile[]>([]);
 const selectedProfileId = ref("");
+const analysisProfile = ref<AnalysisProfile>("general");
 const loadingProfiles = ref(true);
 const submitting = ref(false);
 const uploadProgress = ref(0);
@@ -88,7 +89,11 @@ async function startAnalysis() {
       document = await api.createTextDocument(text);
       uploadProgress.value = 100;
     }
-    const job = await api.createAnalysis(document.id, selectedProfileId.value);
+    const job = await api.createAnalysis(
+      document.id,
+      selectedProfileId.value,
+      analysisProfile.value,
+    );
     await router.push(`/analyses/${job.id}`);
   } catch (cause) {
     error.value =
@@ -212,6 +217,24 @@ onMounted(loadProfiles);
         <div class="step-heading">
           <span>02</span>
           <div>
+            <h3>选择文章场景</h3>
+            <p>场景只影响长文本保护策略，不改变问题分类。</p>
+          </div>
+        </div>
+        <label class="field">
+          <span>分析场景</span>
+          <select v-model="analysisProfile">
+            <option value="general">通用文章</option>
+            <option value="academic">学术论文（保护公式、引用和参考文献）</option>
+            <option value="financial">财报/商业报告（保护金额、表格和财务数字）</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="card form-card">
+        <div class="step-heading">
+          <span>03</span>
+          <div>
             <h3>选择分析模型</h3>
             <p>模型会读取文章正文；请确认服务商的数据政策。</p>
           </div>
@@ -238,8 +261,8 @@ onMounted(loadProfiles);
                 </template>
               </small>
             </span>
-            <em :class="{ verified: profile.is_reference }">
-              {{ profile.is_reference ? "参考配置" : "未经验证" }}
+            <em :class="{ verified: profile.is_reference && analysisProfile === 'general' }">
+              {{ profile.is_reference && analysisProfile === "general" ? "参考配置（以报告为准）" : "未经验证" }}
             </em>
           </label>
         </div>

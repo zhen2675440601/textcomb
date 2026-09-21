@@ -41,10 +41,13 @@ export type AnalysisStatus =
   | "cancelled"
   | "expired";
 
+export type AnalysisProfile = "general" | "academic" | "financial";
+
 export interface Analysis {
   id: string;
   document_id: string;
   model_profile_id: string;
+  analysis_profile: AnalysisProfile;
   status: AnalysisStatus;
   stage: string;
   progress: number;
@@ -93,6 +96,8 @@ export interface ReportSource {
   original_name: string;
   document_format: DocumentFormat;
   char_count: number;
+  char_start: number;
+  char_end: number;
   text: string;
 }
 
@@ -139,6 +144,7 @@ export interface Report {
     char_count: number;
   };
   analysis: {
+    analysis_profile: AnalysisProfile;
     provider_kind: string;
     candidate_model: string;
     verifier_model: string;

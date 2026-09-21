@@ -30,13 +30,22 @@ struct ReportSourceResponse {
     original_name: String,
     document_format: String,
     char_count: u32,
+    char_start: u32,
+    char_end: u32,
     text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceQuery {
+    start: Option<u32>,
+    end: Option<u32>,
 }
 
 async fn get_source(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(report_id): Path<Uuid>,
+    Query(query): Query<SourceQuery>,
 ) -> ApiResult<Json<ReportSourceResponse>> {
     let source = db::load_report_source(&state.pool, report_id, user.id).await?;
     let text = source.extracted_text.ok_or_else(|| {
@@ -45,15 +54,31 @@ async fn get_source(
             "这份历史报告的分析原文已按旧策略清理；请重新分析后查看",
         ))
     })?;
+    let chars: Vec<char> = text.chars().collect();
     let char_count = source
         .char_count
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or_else(|| u32::try_from(text.chars().count()).unwrap_or(u32::MAX));
+        .unwrap_or_else(|| u32::try_from(chars.len()).unwrap_or(u32::MAX));
+    let total = chars.len();
+    let start = usize::try_from(query.start.unwrap_or(0))
+        .unwrap_or(0)
+        .min(total);
+    let requested_end = query
+        .end
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_else(|| start.saturating_add(8_000));
+    let end = requested_end
+        .max(start)
+        .min(total)
+        .min(start.saturating_add(12_000));
+    let window: String = chars[start..end].iter().collect();
     Ok(Json(ReportSourceResponse {
         original_name: source.original_name,
         document_format: source.document_format,
         char_count,
-        text,
+        char_start: u32::try_from(start).unwrap_or(u32::MAX),
+        char_end: u32::try_from(end).unwrap_or(u32::MAX),
+        text: window,
     }))
 }
 

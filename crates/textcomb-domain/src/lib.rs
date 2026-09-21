@@ -4,7 +4,10 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub const REPORT_SCHEMA_V1: &str = "textcomb.report.v1";
-pub const ANALYZER_VERSION: &str = env!("CARGO_PKG_VERSION");
+// This is deliberately independent from the deployment image tag: report
+// snapshots need a stable marker when analysis semantics change between
+// application releases.
+pub const ANALYZER_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+longdoc-v1");
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -78,6 +81,19 @@ string_enum!(IssueCategory {
     Grammar => "grammar",
     Paragraph => "paragraph",
 });
+
+string_enum!(AnalysisProfile {
+    General => "general",
+    Academic => "academic",
+    Financial => "financial",
+});
+
+#[allow(clippy::derivable_impls)]
+impl Default for AnalysisProfile {
+    fn default() -> Self {
+        Self::General
+    }
+}
 
 string_enum!(GrammarSubtype {
     WordOrder => "word_order",
@@ -162,6 +178,8 @@ pub struct DocumentMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnalysisSnapshot {
+    #[serde(default)]
+    pub analysis_profile: AnalysisProfile,
     pub provider_kind: String,
     pub candidate_model: String,
     pub verifier_model: String,

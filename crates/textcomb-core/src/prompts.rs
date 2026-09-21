@@ -1,6 +1,22 @@
-pub const DEFAULT_PROMPT_VERSION: &str = "zh-cn-proofread-v3";
+use textcomb_domain::AnalysisProfile;
+
+pub const DEFAULT_PROMPT_VERSION: &str = "zh-cn-proofread-v4";
+pub const SCENARIO_GUIDANCE_VERSION: &str = "scenario-v1";
 pub const CONFIRMED_THRESHOLD: u8 = 80;
 pub const SUSPECTED_THRESHOLD: u8 = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceEvaluationScope {
+    pub prompt_version: &'static str,
+    pub analyzer_version: &'static str,
+    pub analysis_profile: AnalysisProfile,
+    pub max_chars: usize,
+}
+
+/// Remains `None` until a concrete model/profile release passes the private
+/// evaluation gate. A model row marked `is_reference` cannot claim quality on
+/// its own without this exact prompt/analyzer scope.
+pub const ACTIVE_REFERENCE_EVALUATION: Option<ReferenceEvaluationScope> = None;
 
 pub const CANDIDATE_SYSTEM_PROMPT: &str = r#"
 你是专业的中国大陆简体中文校对助手。你的职责是找出有具体依据的候选问题，不改写全文，不检查事实、论文格式、专业术语或全文一致性。
@@ -45,6 +61,29 @@ pub const VERIFIER_SYSTEM_PROMPT: &str = r#"
 
 纯风格偏好应驳回。分段建议必须是 suspected。无法确认的成语、典故、词义或专名问题应为 suspected。只有依据 ID 直接支持当前判断时才能引用，否则返回空数组。不要输出 Markdown 或额外文字。
 "#;
+
+pub fn analysis_profile_guidance(profile: AnalysisProfile) -> &'static str {
+    match profile {
+        AnalysisProfile::General => "当前场景：通用文章。保持对正常口语、修辞和合理省略的宽容。",
+        AnalysisProfile::Academic => {
+            "当前场景：学术论文。保护公式、变量、引用编号、参考文献、专业术语和表格数字；只检查正文中的语言问题，不判断引用事实或论文格式。"
+        }
+        AnalysisProfile::Financial => {
+            "当前场景：财报或商业报告。保护金额、百分比、日期、证券代码、会计科目、表格数字和单位；不核验财务事实或计算，只检查叙述正文中的语言问题。"
+        }
+    }
+}
+
+pub fn scoped_prompt_version(base_version: &str, profile: AnalysisProfile) -> String {
+    format!(
+        "{base_version}+{SCENARIO_GUIDANCE_VERSION}-{}",
+        profile.as_str()
+    )
+}
+
+pub fn append_profile_guidance(template: &str, profile: AnalysisProfile) -> String {
+    format!("{template}\n\n{}", analysis_profile_guidance(profile))
+}
 
 pub fn candidate_user_prompt(text: &str, evidence_ids: &[String]) -> String {
     let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned());

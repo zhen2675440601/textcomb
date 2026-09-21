@@ -21,7 +21,10 @@ const username = __ENV.TEXTCOMB_USERNAME;
 const password = __ENV.TEXTCOMB_PASSWORD;
 const modelProfileId = __ENV.TEXTCOMB_MODEL_PROFILE_ID;
 const paragraph = "这是用于验证长文任务并发、队列租约和报告隔离的可控测试段落。";
-const documentText = `${paragraph}\n\n`.repeat(Math.ceil(50000 / paragraph.length)).slice(0, 50000);
+const requestedChars = Number(__ENV.TEXTCOMB_LOAD_CHARS || 50000);
+const articleChars = Math.max(1, Math.min(200000, Number.isFinite(requestedChars) ? requestedChars : 50000));
+const analysisProfile = __ENV.TEXTCOMB_ANALYSIS_PROFILE || "general";
+const documentText = `${paragraph}\n\n`.repeat(Math.ceil(articleChars / paragraph.length)).slice(0, articleChars);
 
 export default function () {
   const login = http.post(
@@ -46,6 +49,7 @@ export default function () {
     JSON.stringify({
       document_id: documentId,
       model_profile_id: modelProfileId,
+      analysis_profile: analysisProfile,
     }),
     {
       headers: {

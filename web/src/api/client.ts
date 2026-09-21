@@ -2,6 +2,7 @@ import type {
   AdminUser,
   SystemStatus,
   Analysis,
+  AnalysisProfile,
   DocumentRecord,
   FeedbackVerdict,
   ModelProfile,
@@ -85,13 +86,18 @@ export const api = {
   analysis: (id: string) => request<Analysis>(`/analyses/${id}`),
   deleteAnalysis: (id: string) =>
     request<void>(`/analyses/${id}`, { method: "DELETE" }),
-  createAnalysis: (documentId: string, modelProfileId: string) =>
+  createAnalysis: (
+    documentId: string,
+    modelProfileId: string,
+    analysisProfile: AnalysisProfile = "general",
+  ) =>
     request<Analysis>("/analyses", {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify({
         document_id: documentId,
         model_profile_id: modelProfileId,
+        analysis_profile: analysisProfile,
       }),
     }),
   cancelAnalysis: (id: string) =>
@@ -103,7 +109,11 @@ export const api = {
     }),
 
   report: (id: string) => request<Report>(`/reports/${id}`),
-  reportSource: (id: string) => request<ReportSource>(`/reports/${id}/source`),
+  reportSource: (id: string, start = 0, end?: number) => {
+    const params = new URLSearchParams({ start: String(start) });
+    if (end !== undefined) params.set("end", String(end));
+    return request<ReportSource>(`/reports/${id}/source?${params.toString()}`);
+  },
   deleteReport: (id: string) =>
     request<void>(`/reports/${id}`, { method: "DELETE" }),
   feedback: (issueId: string, verdict: FeedbackVerdict, note?: string) =>

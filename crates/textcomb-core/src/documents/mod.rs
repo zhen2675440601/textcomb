@@ -7,7 +7,7 @@ use std::{io::Cursor, path::Path};
 use textcomb_domain::{DocumentFormat, SourceLocation};
 
 pub const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
-pub const MAX_TEXT_CHARS: usize = 50_000;
+pub const MAX_TEXT_CHARS: usize = 200_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSegment {

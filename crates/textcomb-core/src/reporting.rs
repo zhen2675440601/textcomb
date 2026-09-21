@@ -1,6 +1,6 @@
 use crate::error::{CoreError, CoreResult, ErrorCode};
 use std::path::{Path, PathBuf};
-use textcomb_domain::{Issue, IssueLevel, ReportV1, SourceLocation};
+use textcomb_domain::{AnalysisProfile, Issue, IssueLevel, ReportV1, SourceLocation};
 use tokio::{fs, process::Command, time};
 
 pub fn to_markdown(report: &ReportV1) -> String {
@@ -8,6 +8,10 @@ pub fn to_markdown(report: &ReportV1) -> String {
     output.push_str("# 文梳问题报告\n\n");
     output.push_str(&format!("- 文件：{}\n", report.document.original_name));
     output.push_str(&format!("- 正文字数：{}\n", report.document.char_count));
+    output.push_str(&format!(
+        "- 分析场景：{}\n",
+        analysis_profile_label(report.analysis.analysis_profile)
+    ));
     output.push_str(&format!("- 正式问题：{}\n", report.summary.confirmed));
     output.push_str(&format!("- 疑似问题：{}\n", report.summary.suspected));
     output.push_str(&format!(
@@ -61,9 +65,10 @@ pub fn to_typst(report: &ReportV1) -> String {
 "#,
     );
     output.push_str(&format!(
-        "#table(columns: (80pt, 1fr), [文件], [{}], [正文字数], [{}], [正式问题], [{}], [疑似问题], [{}])\n\n",
+        "#table(columns: (80pt, 1fr), [文件], [{}], [正文字数], [{}], [分析场景], [{}], [正式问题], [{}], [疑似问题], [{}])\n\n",
         typst_escape(&report.document.original_name),
         report.document.char_count,
+        typst_escape(analysis_profile_label(report.analysis.analysis_profile)),
         report.summary.confirmed,
         report.summary.suspected
     ));
@@ -147,6 +152,14 @@ fn category_label(issue: &Issue) -> &'static str {
     }
 }
 
+fn analysis_profile_label(profile: AnalysisProfile) -> &'static str {
+    match profile {
+        AnalysisProfile::General => "通用文章",
+        AnalysisProfile::Academic => "学术论文",
+        AnalysisProfile::Financial => "财报/商业报告",
+    }
+}
+
 fn level_label(level: IssueLevel) -> &'static str {
     match level {
         IssueLevel::Confirmed => "正式问题",
@@ -195,7 +208,9 @@ fn typst_escape(value: &str) -> String {
 mod tests {
     use super::*;
     use ::time::OffsetDateTime;
-    use textcomb_domain::{AnalysisSnapshot, DocumentFormat, DocumentMetadata, ReportV1};
+    use textcomb_domain::{
+        AnalysisProfile, AnalysisSnapshot, DocumentFormat, DocumentMetadata, ReportV1,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -209,6 +224,7 @@ mod tests {
                 char_count: 10,
             },
             AnalysisSnapshot {
+                analysis_profile: AnalysisProfile::General,
                 provider_kind: "openai_compatible".to_owned(),
                 candidate_model: "model".to_owned(),
                 verifier_model: "model".to_owned(),

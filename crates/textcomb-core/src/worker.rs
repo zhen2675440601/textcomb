@@ -4,6 +4,7 @@ use crate::{
     crypto::decrypt_secret,
     db, documents,
     error::{CoreError, CoreResult, ErrorCode},
+    prompts,
     provider::{
         AnalysisProvider, CandidateIssue, ProviderKind, ProviderProfile, VerifiedCandidate,
         create_provider,
@@ -16,8 +17,8 @@ use futures::{StreamExt, stream};
 use sqlx::PgPool;
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use textcomb_domain::{
-    ANALYZER_VERSION, AnalysisSnapshot, DocumentFormat, DocumentMetadata, EvidenceRef, Issue,
-    ReportV1,
+    ANALYZER_VERSION, AnalysisProfile, AnalysisSnapshot, DocumentFormat, DocumentMetadata,
+    EvidenceRef, Issue, ReportV1,
 };
 use tokio::{
     sync::{Mutex, Semaphore},
@@ -211,7 +212,7 @@ impl Worker {
     ) -> CoreResult<()> {
         self.check_cancel(job.id, &stop_token).await?;
         let document_record = db::load_document(&self.pool, job.document_id).await?;
-        let job_configuration = if let Some(snapshot) = &job.model_snapshot {
+        let mut job_configuration = if let Some(snapshot) = &job.model_snapshot {
             serde_json::from_value::<db::JobConfiguration>(snapshot.clone()).map_err(|_| {
                 CoreError::public(ErrorCode::ConfigurationInvalid, "任务模型配置快照无效")
             })?
@@ -222,17 +223,32 @@ impl Worker {
                 Some(prompt_id) => db::load_prompt(&self.pool, prompt_id).await?,
                 None => db::load_active_prompt(&self.pool).await?,
             };
-            let configuration = db::JobConfiguration::from_records(&model_record, &prompt_record);
+            let analysis_profile =
+                AnalysisProfile::from_str(&job.analysis_profile).map_err(|error| {
+                    CoreError::public(ErrorCode::ConfigurationInvalid, error.to_string())
+                })?;
+            let configuration =
+                db::JobConfiguration::from_records(&model_record, &prompt_record, analysis_profile);
             db::set_job_configuration(
                 &self.pool,
                 job.id,
                 worker_id,
-                prompt_record.id,
+                Some(prompt_record.id),
                 &serde_json::to_value(&configuration)?,
             )
             .await?;
             configuration
         };
+        if job_configuration.freeze_profile_guidance() {
+            db::set_job_configuration(
+                &self.pool,
+                job.id,
+                worker_id,
+                job.prompt_version_id,
+                &serde_json::to_value(&job_configuration)?,
+            )
+            .await?;
+        }
         let evidence = Arc::new(db::load_evidence(&self.pool).await?);
         let storage_path = document_record
             .storage_path
@@ -318,7 +334,11 @@ impl Worker {
                 serde_json::from_value::<Vec<VerifiedCandidate>>(output.verifier_output.clone());
             match (candidates, verdicts) {
                 (Ok(candidates), Ok(verdicts)) => {
-                    let resolved = analysis::resolve_candidates(&chunk, candidates);
+                    let resolved = analysis::resolve_candidates(
+                        &chunk,
+                        candidates,
+                        job_configuration.analysis_profile,
+                    );
                     let mut issues = analysis::finalize_issues(
                         &extracted,
                         resolved,
@@ -360,6 +380,7 @@ impl Worker {
             let candidate_model = job_configuration.candidate_model.clone();
             let verifier_model = job_configuration.verifier_model.clone();
             let provider_kind = job_configuration.provider_kind.clone();
+            let analysis_profile = job_configuration.analysis_profile;
             let worker = self.clone();
             let stop = stop_token.clone();
             async move {
@@ -379,6 +400,7 @@ impl Worker {
                     &provider_kind,
                     &candidate_model,
                     &verifier_model,
+                    analysis_profile,
                     confirmed_threshold,
                     suspected_threshold,
                     stop.clone(),
@@ -445,12 +467,20 @@ impl Worker {
                 char_count: extracted.char_count as u32,
             },
             AnalysisSnapshot {
+                analysis_profile: job_configuration.analysis_profile,
                 provider_kind: job_configuration.provider_kind.clone(),
                 candidate_model: job_configuration.candidate_model.clone(),
                 verifier_model: job_configuration.verifier_model.clone(),
                 prompt_version: job_configuration.prompt_version.clone(),
                 analyzer_version: ANALYZER_VERSION.to_owned(),
-                reference_profile: job_configuration.is_reference,
+                reference_profile: qualifies_for_reference_evaluation(
+                    prompts::ACTIVE_REFERENCE_EVALUATION,
+                    job_configuration.is_reference,
+                    job_configuration.analysis_profile,
+                    extracted.char_count,
+                    &job_configuration.prompt_version,
+                    ANALYZER_VERSION,
+                ),
             },
             issues,
             OffsetDateTime::now_utc(),
@@ -583,6 +613,7 @@ async fn analyze_chunk(
     provider_kind: &str,
     candidate_model: &str,
     verifier_model: &str,
+    analysis_profile: AnalysisProfile,
     confirmed_threshold: u8,
     suspected_threshold: u8,
     stop_token: CancellationToken,
@@ -643,7 +674,47 @@ async fn analyze_chunk(
     }
     ensure_not_cancelled(pool, job_id, &stop_token).await?;
     let candidates: Vec<CandidateIssue> = candidate_result.value.issues;
-    let resolved = analysis::resolve_candidates(&chunk, candidates.clone());
+    if candidates.is_empty() {
+        let candidate_json = serde_json::to_value(&candidates)?;
+        let verifier_json = serde_json::json!([]);
+        db::save_chunk_outputs(
+            pool,
+            job_id,
+            worker_id,
+            chunk.index,
+            &candidate_json,
+            &verifier_json,
+        )
+        .await?;
+        return Ok(Vec::new());
+    }
+    let resolved = analysis::resolve_candidates(&chunk, candidates.clone(), analysis_profile);
+    if resolved.is_empty() {
+        let candidate_json = serde_json::to_value(&candidates)?;
+        let verifier_json = serde_json::json!([]);
+        db::save_chunk_outputs(
+            pool,
+            job_id,
+            worker_id,
+            chunk.index,
+            &candidate_json,
+            &verifier_json,
+        )
+        .await?;
+        return Ok(Vec::new());
+    }
+    let verification_candidate_indexes: Vec<usize> = resolved
+        .iter()
+        .map(|candidate| candidate.candidate_index)
+        .collect();
+    let verification_candidates = verification_candidate_indexes
+        .iter()
+        .map(|index| {
+            candidates.get(*index).cloned().ok_or_else(|| {
+                CoreError::public(ErrorCode::ModelOutputInvalid, "候选问题索引超出允许范围")
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
     db::mark_chunk_verifying(pool, job_id, worker_id, chunk.index).await?;
     let verification_result = {
         let _profile_permit = profile_semaphore.acquire().await.map_err(|_| {
@@ -660,7 +731,7 @@ async fn analyze_chunk(
                     Err(error) => Err(error),
                 }
             }
-            result = provider.verify(&chunk.text, &candidates, &evidence_ids) => result,
+            result = provider.verify(&chunk.text, &verification_candidates, &evidence_ids) => result,
         };
         result?
     };
@@ -698,8 +769,10 @@ async fn analyze_chunk(
         )
         .await?;
     }
+    let mut verdicts = verification_result.value.verdicts;
+    remap_verdict_indexes(&mut verdicts, &verification_candidate_indexes)?;
     let candidate_json = serde_json::to_value(&candidates)?;
-    let verifier_json = serde_json::to_value(&verification_result.value.verdicts)?;
+    let verifier_json = serde_json::to_value(&verdicts)?;
     db::save_chunk_outputs(
         pool,
         job_id,
@@ -712,11 +785,47 @@ async fn analyze_chunk(
     analysis::finalize_issues(
         &extracted,
         resolved,
-        verification_result.value.verdicts,
+        verdicts,
         &evidence,
         confirmed_threshold,
         suspected_threshold,
     )
+}
+
+fn remap_verdict_indexes(
+    verdicts: &mut [VerifiedCandidate],
+    original_indexes: &[usize],
+) -> CoreResult<()> {
+    for verdict in verdicts {
+        verdict.candidate_index = original_indexes
+            .get(verdict.candidate_index)
+            .copied()
+            .ok_or_else(|| {
+                CoreError::public(ErrorCode::ModelOutputInvalid, "复核候选索引超出允许范围")
+            })?;
+    }
+    Ok(())
+}
+
+/// The database currently certifies a model profile, but not a separate
+/// paper/financial prompt or long-document evaluation suite. Keep the badge
+/// conservative until those evaluation scopes are modeled explicitly.
+fn qualifies_for_reference_evaluation(
+    evaluation: Option<prompts::ReferenceEvaluationScope>,
+    is_reference_model: bool,
+    analysis_profile: AnalysisProfile,
+    char_count: usize,
+    prompt_version: &str,
+    analyzer_version: &str,
+) -> bool {
+    let Some(evaluation) = evaluation else {
+        return false;
+    };
+    is_reference_model
+        && analysis_profile == evaluation.analysis_profile
+        && char_count <= evaluation.max_chars
+        && prompt_version == evaluation.prompt_version
+        && analyzer_version == evaluation.analyzer_version
 }
 
 async fn ensure_not_cancelled(
@@ -734,4 +843,84 @@ async fn ensure_not_cancelled(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_badge_is_limited_to_the_evaluated_scope() {
+        let evaluation = Some(prompts::ReferenceEvaluationScope {
+            prompt_version: "zh-cn-proofread-v4+scenario-v1-general",
+            analyzer_version: "0.1.0+longdoc-v1",
+            analysis_profile: AnalysisProfile::General,
+            max_chars: 50_000,
+        });
+        assert!(qualifies_for_reference_evaluation(
+            evaluation,
+            true,
+            AnalysisProfile::General,
+            50_000,
+            "zh-cn-proofread-v4+scenario-v1-general",
+            "0.1.0+longdoc-v1"
+        ));
+        assert!(!qualifies_for_reference_evaluation(
+            evaluation,
+            true,
+            AnalysisProfile::Academic,
+            20_000,
+            "zh-cn-proofread-v4+scenario-v1-general",
+            "0.1.0+longdoc-v1"
+        ));
+        assert!(!qualifies_for_reference_evaluation(
+            evaluation,
+            true,
+            AnalysisProfile::General,
+            20_000,
+            "zh-cn-proofread-v3+scenario-v1-general",
+            "0.1.0+longdoc-v1"
+        ));
+        assert!(!qualifies_for_reference_evaluation(
+            evaluation,
+            true,
+            AnalysisProfile::General,
+            50_001,
+            "zh-cn-proofread-v4+scenario-v1-general",
+            "0.1.0+longdoc-v1"
+        ));
+        assert!(!qualifies_for_reference_evaluation(
+            None,
+            true,
+            AnalysisProfile::General,
+            1,
+            "zh-cn-proofread-v4+scenario-v1-general",
+            "0.1.0+longdoc-v1"
+        ));
+    }
+
+    #[test]
+    fn verifier_indexes_are_mapped_back_to_original_candidates() {
+        let mut verdicts = vec![
+            VerifiedCandidate {
+                candidate_index: 0,
+                verdict: crate::provider::VerificationVerdict::Confirmed,
+                confidence: 90,
+                reason: String::new(),
+                suggestion: String::new(),
+                evidence_source_ids: Vec::new(),
+            },
+            VerifiedCandidate {
+                candidate_index: 1,
+                verdict: crate::provider::VerificationVerdict::Suspected,
+                confidence: 70,
+                reason: String::new(),
+                suggestion: String::new(),
+                evidence_source_ids: Vec::new(),
+            },
+        ];
+        remap_verdict_indexes(&mut verdicts, &[2, 7]).unwrap();
+        assert_eq!(verdicts[0].candidate_index, 2);
+        assert_eq!(verdicts[1].candidate_index, 7);
+    }
 }

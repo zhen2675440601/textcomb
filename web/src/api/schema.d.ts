@@ -178,7 +178,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"][];
+                    };
                 };
             };
         };
@@ -203,7 +205,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"];
+                    };
                 };
             };
         };
@@ -236,7 +240,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"];
+                    };
                 };
             };
         };
@@ -366,7 +372,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"];
+                    };
                 };
             };
         };
@@ -967,7 +975,10 @@ export interface paths {
         };
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    start?: number;
+                    end?: number;
+                };
                 header?: never;
                 path: {
                     id: components["parameters"]["UuidId"];
@@ -1000,7 +1011,34 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Analysis: {
+            /** @enum {string} */
+            analysis_profile: "general" | "academic" | "financial";
+            /** Format: date-time */
+            completed_at: string | null;
+            completed_chunks: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            document_id: string;
+            error_code: string | null;
+            error_message: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            model_profile_id: string;
+            progress: number;
+            /** Format: uuid */
+            report_id: string | null;
+            stage: string;
+            /** Format: date-time */
+            started_at: string | null;
+            status: string;
+            total_chunks: number;
+        };
         CreateAnalysis: {
+            /** @enum {string} */
+            analysis_profile?: "general" | "academic" | "financial";
             /** Format: uuid */
             document_id: string;
             /** Format: uuid */
@@ -1084,13 +1122,24 @@ export interface components {
         };
         ReportSource: {
             char_count: number;
+            char_end: number;
+            char_start: number;
             /** @enum {string} */
             document_format: "txt" | "docx" | "pdf";
             original_name: string;
             text: string;
         };
         ReportV1: {
-            analysis: Record<string, never>;
+            analysis: {
+                /** @enum {string} */
+                analysis_profile: "general" | "academic" | "financial";
+                analyzer_version: string;
+                candidate_model: string;
+                prompt_version: string;
+                provider_kind: string;
+                reference_profile: boolean;
+                verifier_model: string;
+            };
             complete: boolean;
             document: Record<string, never>;
             /** Format: date-time */

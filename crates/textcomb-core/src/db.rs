@@ -21,6 +21,7 @@ pub struct ClaimedJob {
     pub user_id: Uuid,
     pub document_id: Uuid,
     pub model_profile_id: Uuid,
+    pub analysis_profile: String,
     pub prompt_version_id: Option<Uuid>,
     pub model_snapshot: Option<Value>,
     pub attempt_count: i32,
@@ -66,6 +67,10 @@ pub struct PromptRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobConfiguration {
+    #[serde(default)]
+    pub analysis_profile: textcomb_domain::AnalysisProfile,
+    #[serde(default)]
+    pub scenario_guidance_version: String,
     pub provider_kind: String,
     pub base_url: String,
     pub api_key_ciphertext: Vec<u8>,
@@ -81,8 +86,14 @@ pub struct JobConfiguration {
 }
 
 impl JobConfiguration {
-    pub fn from_records(profile: &ModelProfileRecord, prompt: &PromptRecord) -> Self {
-        Self {
+    pub fn from_records(
+        profile: &ModelProfileRecord,
+        prompt: &PromptRecord,
+        analysis_profile: textcomb_domain::AnalysisProfile,
+    ) -> Self {
+        let mut configuration = Self {
+            analysis_profile,
+            scenario_guidance_version: String::new(),
             provider_kind: profile.provider_kind.clone(),
             base_url: profile.base_url.clone(),
             api_key_ciphertext: profile.api_key_ciphertext.clone(),
@@ -95,7 +106,29 @@ impl JobConfiguration {
             verifier_system_prompt: prompt.verifier_template.clone(),
             confirmed_threshold: prompt.confirmed_threshold,
             suspected_threshold: prompt.suspected_threshold,
+        };
+        configuration.freeze_profile_guidance();
+        configuration
+    }
+
+    /// Persist the exact scenario-specific instructions with the job so a
+    /// queued or retried task is not affected by later application deploys.
+    /// Returns whether an older snapshot was upgraded in memory.
+    pub fn freeze_profile_guidance(&mut self) -> bool {
+        // Any non-empty value means this snapshot already contains the exact
+        // guidance used when the job was created. A future guidance release
+        // must not rewrite queued or retried jobs from an older version.
+        if !self.scenario_guidance_version.is_empty() {
+            return false;
         }
+        self.candidate_system_prompt =
+            prompts::append_profile_guidance(&self.candidate_system_prompt, self.analysis_profile);
+        self.verifier_system_prompt =
+            prompts::append_profile_guidance(&self.verifier_system_prompt, self.analysis_profile);
+        self.prompt_version =
+            prompts::scoped_prompt_version(&self.prompt_version, self.analysis_profile);
+        self.scenario_guidance_version = prompts::SCENARIO_GUIDANCE_VERSION.to_owned();
+        true
     }
 }
 
@@ -207,7 +240,8 @@ pub async fn claim_job(pool: &PgPool, worker_id: &str) -> CoreResult<Option<Clai
         FROM candidate
         WHERE job.id = candidate.id
             RETURNING job.id, job.user_id, job.document_id, job.model_profile_id,
-                  job.prompt_version_id, job.model_snapshot, job.attempt_count
+                  job.analysis_profile, job.prompt_version_id, job.model_snapshot,
+                  job.attempt_count
         "#,
     )
     .bind(worker_id)
@@ -564,7 +598,7 @@ pub async fn set_job_configuration(
     pool: &PgPool,
     job_id: Uuid,
     worker_id: &str,
-    prompt_version_id: Uuid,
+    prompt_version_id: Option<Uuid>,
     model_snapshot: &Value,
 ) -> CoreResult<()> {
     let result = sqlx::query(
@@ -1202,5 +1236,55 @@ pub async fn confirm_cleanup_target(pool: &PgPool, target: &CleanupTarget) -> Co
             transaction.commit().await?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use textcomb_domain::AnalysisProfile;
+
+    #[test]
+    fn profile_guidance_is_frozen_once_in_job_snapshot() {
+        let mut configuration = JobConfiguration {
+            analysis_profile: AnalysisProfile::Academic,
+            scenario_guidance_version: String::new(),
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            api_key_ciphertext: vec![1],
+            candidate_model: "candidate".to_owned(),
+            verifier_model: "verifier".to_owned(),
+            max_concurrency: 1,
+            is_reference: false,
+            prompt_version: "zh-cn-proofread-v3".to_owned(),
+            candidate_system_prompt: "候选基础提示".to_owned(),
+            verifier_system_prompt: "复核基础提示".to_owned(),
+            confirmed_threshold: 80,
+            suspected_threshold: 50,
+        };
+
+        assert!(configuration.freeze_profile_guidance());
+        assert_eq!(
+            configuration.prompt_version,
+            "zh-cn-proofread-v3+scenario-v1-academic"
+        );
+        assert!(
+            configuration
+                .candidate_system_prompt
+                .contains("当前场景：学术论文")
+        );
+        assert!(
+            configuration
+                .verifier_system_prompt
+                .contains("当前场景：学术论文")
+        );
+        let candidate_prompt = configuration.candidate_system_prompt.clone();
+        assert!(!configuration.freeze_profile_guidance());
+        assert_eq!(configuration.candidate_system_prompt, candidate_prompt);
+
+        configuration.scenario_guidance_version = "scenario-v0".to_owned();
+        configuration.candidate_system_prompt = "已冻结的旧版提示".to_owned();
+        assert!(!configuration.freeze_profile_guidance());
+        assert_eq!(configuration.candidate_system_prompt, "已冻结的旧版提示");
     }
 }

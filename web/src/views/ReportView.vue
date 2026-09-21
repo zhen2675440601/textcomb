@@ -27,6 +27,7 @@ const sourceLoading = ref(false);
 const sourceError = ref("");
 const source = ref<ReportSource | null>(null);
 const selectedIssueId = ref<string | null>(null);
+let sourceRequestVersion = 0;
 
 const reportId = String(route.params.id);
 
@@ -35,6 +36,12 @@ const categoryLabels: Record<IssueCategory, string> = {
   punctuation: "标点",
   grammar: "病句",
   paragraph: "分段",
+};
+
+const analysisProfileLabels: Record<"general" | "academic" | "financial", string> = {
+  general: "通用文章",
+  academic: "学术论文",
+  financial: "财报/商业报告",
 };
 
 const subtypeLabels: Record<string, string> = {
@@ -71,10 +78,22 @@ const sourceSelection = computed(() => {
   if (!source.value) return null;
   const issue = report.value?.issues.find((item) => item.id === selectedIssueId.value);
   if (!issue) return { before: source.value.text, selected: "", after: "" };
+  if (
+    issue.location.char_start < source.value.char_start ||
+    issue.location.char_end > source.value.char_end
+  ) {
+    return { before: source.value.text, selected: "", after: "" };
+  }
 
   const chars = Array.from(source.value.text);
-  const start = Math.min(Math.max(issue.location.char_start, 0), chars.length);
-  const end = Math.min(Math.max(issue.location.char_end, start), chars.length);
+  const start = Math.min(
+    Math.max(issue.location.char_start - source.value.char_start, 0),
+    chars.length,
+  );
+  const end = Math.min(
+    Math.max(issue.location.char_end - source.value.char_start, start),
+    chars.length,
+  );
   return {
     before: chars.slice(0, start).join(""),
     selected: chars.slice(start, end).join(""),
@@ -110,25 +129,44 @@ function toggle(issue: Issue) {
 async function openSource(issue?: Issue) {
   if (issue) selectedIssueId.value = issue.id;
   sourceOpen.value = true;
-  if (source.value || sourceLoading.value) return;
-
-  sourceLoading.value = true;
   sourceError.value = "";
-  try {
-    source.value = await api.reportSource(reportId);
-  } catch (cause) {
-    sourceError.value = cause instanceof ApiProblem ? cause.message : "无法读取分析原文";
-  } finally {
+
+  const selectedIssue = issue ?? report.value?.issues.find((item) => item.id === selectedIssueId.value);
+  const start = selectedIssue ? Math.max(0, selectedIssue.location.char_start - 3_000) : 0;
+  const end = selectedIssue ? selectedIssue.location.char_end + 3_000 : 8_000;
+  const coverageEnd = source.value ? Math.min(end, source.value.char_count) : end;
+  if (
+    source.value &&
+    source.value.char_start <= start &&
+    source.value.char_end >= coverageEnd
+  ) {
+    sourceRequestVersion += 1;
     sourceLoading.value = false;
+    return;
+  }
+
+  const requestVersion = ++sourceRequestVersion;
+  sourceLoading.value = true;
+  try {
+    const nextSource = await api.reportSource(reportId, start, end);
+    if (requestVersion === sourceRequestVersion) source.value = nextSource;
+  } catch (cause) {
+    if (requestVersion === sourceRequestVersion) {
+      sourceError.value = cause instanceof ApiProblem ? cause.message : "无法读取分析原文";
+    }
+  } finally {
+    if (requestVersion === sourceRequestVersion) sourceLoading.value = false;
   }
 }
 
 function toggleSource() {
   if (sourceOpen.value) {
+    sourceRequestVersion += 1;
+    sourceLoading.value = false;
     sourceOpen.value = false;
     return;
   }
-  void openSource();
+  void openSource(report.value?.issues.find((item) => item.id === selectedIssueId.value));
 }
 
 function scrollToSelectedSource() {
@@ -218,7 +256,7 @@ onMounted(load);
             {{ formatDate(report.generated_at) }}
           </p>
           <span class="quality-badge" :class="{ verified: report.analysis.reference_profile }">
-            {{ report.analysis.reference_profile ? "质量验证配置" : "模型配置未经私有评测" }}
+            {{ report.analysis.reference_profile ? "质量验证配置" : "本次配置未经私有评测" }}
           </span>
         </div>
         <div class="report-actions">
@@ -319,6 +357,7 @@ onMounted(load);
           <div class="analysis-metadata">
             <h4>分析信息</h4>
             <dl>
+              <div><dt>分析场景</dt><dd>{{ analysisProfileLabels[report.analysis.analysis_profile] ?? "通用文章" }}</dd></div>
               <div><dt>候选模型</dt><dd>{{ report.analysis.candidate_model }}</dd></div>
               <div><dt>复核模型</dt><dd>{{ report.analysis.verifier_model }}</dd></div>
               <div><dt>提示词版本</dt><dd>{{ report.analysis.prompt_version }}</dd></div>
@@ -429,7 +468,7 @@ onMounted(load);
               <p class="eyebrow">ANALYSIS SOURCE</p>
               <h3>分析原文</h3>
             </div>
-            <button class="icon-button" type="button" aria-label="收起原文" @click="sourceOpen = false">
+            <button class="icon-button" type="button" aria-label="收起原文" @click="toggleSource">
               ×
             </button>
           </header>
@@ -440,7 +479,11 @@ onMounted(load);
             <p>{{ sourceError }}</p>
           </div>
           <div v-else-if="source" class="source-scroll">
-            <p class="source-meta">{{ source.original_name }} · {{ source.char_count.toLocaleString("zh-CN") }} 字符</p>
+            <p class="source-meta">
+              {{ source.original_name }} ·
+              {{ (source.char_start + 1).toLocaleString("zh-CN") }}–{{ source.char_end.toLocaleString("zh-CN") }} /
+              {{ source.char_count.toLocaleString("zh-CN") }} 字符
+            </p>
             <pre class="source-text"><template v-if="sourceSelection?.selected">{{ sourceSelection.before }}<mark id="report-source-selection">{{ sourceSelection.selected }}</mark>{{ sourceSelection.after }}</template><template v-else>{{ source.text }}</template></pre>
           </div>
         </aside>

@@ -5,8 +5,9 @@
 ## 当前范围
 
 - 中国大陆简体中文。
-- 直接粘贴正文、TXT、DOCX、文字型 PDF；单文件不超过 20 MiB、正文不超过 5 万字。
+- 直接粘贴正文、TXT、DOCX、文字型 PDF；单文件不超过 20 MiB、正文不超过 20 万字。
 - AI 高召回候选与 AI 二次复核。
+- 长文支持通用文章、学术论文和财报/商业报告场景，并按范围加载原文窗口。
 - 在线报告、可定位问题的分析原文、JSON、Markdown 和 PDF 导出。
 - 用户自带 OpenAI Responses、OpenAI Compatible 或 Anthropic 模型密钥。
 
@@ -58,3 +59,7 @@ web/                   Vue 3 工作台
 migrations/            PostgreSQL 前滚迁移
 load/                  10 篇长文并发负载脚本
 ```
+
+负载脚本默认生成 5 万字文章；验证长文上限时可设置
+`TEXTCOMB_LOAD_CHARS=200000`，论文或财报场景可设置
+`TEXTCOMB_ANALYSIS_PROFILE=academic` 或 `financial`。

@@ -124,7 +124,14 @@ async fn specification() -> Json<Value> {
             "/analyses": {
                 "get": {
                     "tags": ["analyses"],
-                    "responses": { "200": { "description": "任务列表" } }
+                    "responses": {
+                        "200": {
+                            "description": "任务列表",
+                            "content": { "application/json": {
+                                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Analysis" } }
+                            } }
+                        }
+                    }
                 },
                 "post": {
                     "tags": ["analyses"],
@@ -135,14 +142,24 @@ async fn specification() -> Json<Value> {
                             "schema": { "$ref": "#/components/schemas/CreateAnalysis" }
                         } }
                     },
-                    "responses": { "202": { "description": "任务已创建并排队" } }
+                    "responses": {
+                        "202": {
+                            "description": "任务已创建并排队",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Analysis" } } }
+                        }
+                    }
                 }
             },
             "/analyses/{id}": {
                 "get": {
                     "tags": ["analyses"],
                     "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
-                    "responses": { "200": { "description": "任务详情" } }
+                    "responses": {
+                        "200": {
+                            "description": "任务详情",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Analysis" } } }
+                        }
+                    }
                 },
                 "delete": {
                     "tags": ["analyses"],
@@ -176,7 +193,12 @@ async fn specification() -> Json<Value> {
                         { "$ref": "#/components/parameters/UuidId" },
                         { "$ref": "#/components/parameters/IdempotencyKey" }
                     ],
-                    "responses": { "202": { "description": "已重新排队" } }
+                    "responses": {
+                        "202": {
+                            "description": "已重新排队",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Analysis" } } }
+                        }
+                    }
                 }
             },
             "/reports/{id}": {
@@ -199,7 +221,11 @@ async fn specification() -> Json<Value> {
             "/reports/{id}/source": {
                 "get": {
                     "tags": ["reports"],
-                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "parameters": [
+                        { "$ref": "#/components/parameters/UuidId" },
+                        { "name": "start", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
+                        { "name": "end", "in": "query", "schema": { "type": "integer", "minimum": 0 } }
+                    ],
                     "responses": {
                         "200": {
                             "description": "与报告位置对应的提取正文",
@@ -410,14 +436,15 @@ async fn specification() -> Json<Value> {
                     "required": ["document_id", "model_profile_id"],
                     "properties": {
                         "document_id": { "type": "string", "format": "uuid" },
-                        "model_profile_id": { "type": "string", "format": "uuid" }
+                        "model_profile_id": { "type": "string", "format": "uuid" },
+                        "analysis_profile": { "type": "string", "enum": ["general", "academic", "financial"] }
                     }
                 },
                 "CreateTextDocument": {
                     "type": "object",
                     "required": ["text"],
                     "properties": {
-                        "text": { "type": "string", "minLength": 1, "maxLength": 50000 }
+                        "text": { "type": "string", "minLength": 1, "maxLength": 200000 }
                     }
                 },
                 "DocumentRecord": {
@@ -435,6 +462,31 @@ async fn specification() -> Json<Value> {
                         "char_count": { "type": ["integer", "null"], "minimum": 0 },
                         "content_available": { "type": "boolean" },
                         "created_at": { "type": "string", "format": "date-time" }
+                    }
+                },
+                "Analysis": {
+                    "type": "object",
+                    "required": [
+                        "id", "document_id", "model_profile_id", "analysis_profile", "status", "stage",
+                        "progress", "total_chunks", "completed_chunks", "error_code", "error_message",
+                        "report_id", "created_at", "started_at", "completed_at"
+                    ],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "document_id": { "type": "string", "format": "uuid" },
+                        "model_profile_id": { "type": "string", "format": "uuid" },
+                        "analysis_profile": { "type": "string", "enum": ["general", "academic", "financial"] },
+                        "status": { "type": "string" },
+                        "stage": { "type": "string" },
+                        "progress": { "type": "integer" },
+                        "total_chunks": { "type": "integer" },
+                        "completed_chunks": { "type": "integer" },
+                        "error_code": { "type": ["string", "null"] },
+                        "error_message": { "type": ["string", "null"] },
+                        "report_id": { "type": ["string", "null"], "format": "uuid" },
+                        "created_at": { "type": "string", "format": "date-time" },
+                        "started_at": { "type": ["string", "null"], "format": "date-time" },
+                        "completed_at": { "type": ["string", "null"], "format": "date-time" }
                     }
                 },
                 "CreateModelProfile": {
@@ -513,7 +565,22 @@ async fn specification() -> Json<Value> {
                         "report_id": { "type": "string", "format": "uuid" },
                         "job_id": { "type": "string", "format": "uuid" },
                         "document": { "type": "object" },
-                        "analysis": { "type": "object" },
+                        "analysis": {
+                            "type": "object",
+                            "required": [
+                                "analysis_profile", "provider_kind", "candidate_model",
+                                "verifier_model", "prompt_version", "analyzer_version", "reference_profile"
+                            ],
+                            "properties": {
+                                "analysis_profile": { "type": "string", "enum": ["general", "academic", "financial"] },
+                                "provider_kind": { "type": "string" },
+                                "candidate_model": { "type": "string" },
+                                "verifier_model": { "type": "string" },
+                                "prompt_version": { "type": "string" },
+                                "analyzer_version": { "type": "string" },
+                                "reference_profile": { "type": "boolean" }
+                            }
+                        },
                         "summary": { "type": "object" },
                         "issues": {
                             "type": "array",
@@ -525,11 +592,13 @@ async fn specification() -> Json<Value> {
                 },
                 "ReportSource": {
                     "type": "object",
-                    "required": ["original_name", "document_format", "char_count", "text"],
+                    "required": ["original_name", "document_format", "char_count", "char_start", "char_end", "text"],
                     "properties": {
                         "original_name": { "type": "string" },
                         "document_format": { "type": "string", "enum": ["txt", "docx", "pdf"] },
                         "char_count": { "type": "integer", "minimum": 0 },
+                        "char_start": { "type": "integer", "minimum": 0 },
+                        "char_end": { "type": "integer", "minimum": 0 },
                         "text": { "type": "string" }
                     }
                 },
