@@ -966,6 +966,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/reports/{id}/misses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["UuidId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        category: "typo" | "punctuation" | "grammar" | "paragraph";
+                        char_end: number;
+                        char_start: number;
+                        note: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description 漏检反馈已保存 */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MissedIssueFeedback"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/reports/{id}/misses/{miss_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["UuidId"];
+                    miss_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description 漏检反馈已删除 */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/reports/{id}/source": {
         parameters: {
             query?: never;
@@ -1094,6 +1177,18 @@ export interface components {
             reason: string;
             suggestion: string;
         };
+        MissedIssueFeedback: {
+            /** @enum {string} */
+            category: "typo" | "punctuation" | "grammar" | "paragraph";
+            char_end: number;
+            char_start: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            note: string;
+            quote: string;
+        };
         ModelProfile: {
             /** Format: uri */
             base_url: string;
@@ -1147,6 +1242,7 @@ export interface components {
             issues: components["schemas"]["Issue"][];
             /** Format: uuid */
             job_id: string;
+            missed_issues?: components["schemas"]["MissedIssueFeedback"][];
             /** Format: uuid */
             report_id: string;
             /** @constant */

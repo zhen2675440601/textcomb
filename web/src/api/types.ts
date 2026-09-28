@@ -134,6 +134,16 @@ export interface Issue {
   feedback?: FeedbackVerdict;
 }
 
+export interface MissedIssueFeedback {
+  id: string;
+  category: IssueCategory;
+  char_start: number;
+  char_end: number;
+  quote: string;
+  note: string;
+  created_at: string;
+}
+
 export interface Report {
   schema: "textcomb.report.v1";
   report_id: string;
@@ -162,6 +172,7 @@ export interface Report {
     paragraph: number;
   };
   issues: Issue[];
+  missed_issues?: MissedIssueFeedback[];
   complete: boolean;
   generated_at: string;
 }

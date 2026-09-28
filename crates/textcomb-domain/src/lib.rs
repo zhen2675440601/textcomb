@@ -7,7 +7,7 @@ pub const REPORT_SCHEMA_V1: &str = "textcomb.report.v1";
 // This is deliberately independent from the deployment image tag: report
 // snapshots need a stable marker when analysis semantics change between
 // application releases.
-pub const ANALYZER_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+longdoc-v1");
+pub const ANALYZER_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+longdoc-v1-grammar-v3");
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -170,6 +170,18 @@ pub struct Issue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MissedIssueFeedback {
+    pub id: Uuid,
+    pub category: IssueCategory,
+    pub char_start: u32,
+    pub char_end: u32,
+    pub quote: String,
+    pub note: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DocumentMetadata {
     pub original_name: String,
     pub format: DocumentFormat,
@@ -228,6 +240,8 @@ pub struct ReportV1 {
     pub analysis: AnalysisSnapshot,
     pub summary: ReportSummary,
     pub issues: Vec<Issue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missed_issues: Vec<MissedIssueFeedback>,
     pub complete: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub generated_at: OffsetDateTime,
@@ -251,6 +265,7 @@ impl ReportV1 {
             analysis,
             summary,
             issues,
+            missed_issues: Vec::new(),
             complete: true,
             generated_at,
         }

@@ -7,7 +7,7 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
-use textcomb_domain::{IssueCategory, IssueLevel, ReportV1};
+use textcomb_domain::{GrammarSubtype, IssueCategory, IssueLevel, ReportV1};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,6 +35,7 @@ struct GoldDocument {
 #[derive(Debug, Clone, Deserialize)]
 struct GoldIssue {
     category: IssueCategory,
+    grammar_subtype: Option<GrammarSubtype>,
     char_start: u32,
     char_end: u32,
 }
@@ -42,6 +43,7 @@ struct GoldIssue {
 #[derive(Debug, Clone)]
 struct Prediction {
     category: IssueCategory,
+    grammar_subtype: Option<GrammarSubtype>,
     level: IssueLevel,
     char_start: u32,
     char_end: u32,
@@ -70,6 +72,8 @@ struct EvaluationSummary {
     suspected_only: Metrics,
     combined: Metrics,
     combined_by_category: BTreeMap<String, Metrics>,
+    grammar_detection: Metrics,
+    combined_by_grammar_subtype: BTreeMap<String, Metrics>,
 }
 
 fn main() -> Result<()> {
@@ -79,6 +83,8 @@ fn main() -> Result<()> {
     let mut suspected_only = Counts::default();
     let mut combined = Counts::default();
     let mut by_category: HashMap<IssueCategory, Counts> = HashMap::new();
+    let mut grammar_detection = Counts::default();
+    let mut by_grammar_subtype: HashMap<GrammarSubtype, Counts> = HashMap::new();
 
     for document in &gold {
         let report_path = cli
@@ -106,6 +112,35 @@ fn main() -> Result<()> {
         );
         accumulate(&document.issues, predictions.iter(), &mut combined);
 
+        let grammar_gold: Vec<_> = document
+            .issues
+            .iter()
+            .filter(|issue| issue.category == IssueCategory::Grammar)
+            .cloned()
+            .collect();
+        accumulate_with_subtype_policy(
+            &grammar_gold,
+            predictions
+                .iter()
+                .filter(|issue| issue.category == IssueCategory::Grammar),
+            &mut grammar_detection,
+            false,
+        );
+        for subtype in grammar_subtypes() {
+            let subtype_gold: Vec<_> = grammar_gold
+                .iter()
+                .filter(|issue| issue.grammar_subtype == Some(subtype))
+                .cloned()
+                .collect();
+            accumulate(
+                &subtype_gold,
+                predictions
+                    .iter()
+                    .filter(|issue| issue.grammar_subtype == Some(subtype)),
+                by_grammar_subtype.entry(subtype).or_default(),
+            );
+        }
+
         for category in [
             IssueCategory::Typo,
             IssueCategory::Punctuation,
@@ -130,7 +165,7 @@ fn main() -> Result<()> {
     }
 
     let summary = EvaluationSummary {
-        schema: "textcomb.evaluation.v1",
+        schema: "textcomb.evaluation.v2",
         documents: gold.len(),
         confirmed: metrics(confirmed),
         suspected_only: metrics(suspected_only),
@@ -138,6 +173,11 @@ fn main() -> Result<()> {
         combined_by_category: by_category
             .into_iter()
             .map(|(category, counts)| (category.as_str().to_owned(), metrics(counts)))
+            .collect(),
+        grammar_detection: metrics(grammar_detection),
+        combined_by_grammar_subtype: by_grammar_subtype
+            .into_iter()
+            .map(|(subtype, counts)| (subtype.as_str().to_owned(), metrics(counts)))
             .collect(),
     };
     let json = serde_json::to_string_pretty(&summary)?;
@@ -172,6 +212,14 @@ fn load_gold(path: &Path) -> Result<Vec<GoldDocument>> {
                 .map(|issue| (issue.char_start, issue.char_end)),
             &document.document_id,
         )?;
+        for issue in &document.issues {
+            if (issue.category == IssueCategory::Grammar) != issue.grammar_subtype.is_some() {
+                bail!(
+                    "grammar_subtype is required only for grammar issues in {}",
+                    document.document_id
+                );
+            }
+        }
         documents.push(document);
     }
     if documents.is_empty() {
@@ -193,6 +241,7 @@ fn load_predictions(path: &Path) -> Result<Vec<Prediction>> {
         .into_iter()
         .map(|issue| Prediction {
             category: issue.category,
+            grammar_subtype: issue.grammar_subtype,
             level: issue.level,
             char_start: issue.location.char_start,
             char_end: issue.location.char_end,
@@ -214,17 +263,36 @@ fn accumulate<'a>(
     predictions: impl Iterator<Item = &'a Prediction>,
     counts: &mut Counts,
 ) {
+    accumulate_with_subtype_policy(gold, predictions, counts, true);
+}
+
+fn accumulate_with_subtype_policy<'a>(
+    gold: &[GoldIssue],
+    predictions: impl Iterator<Item = &'a Prediction>,
+    counts: &mut Counts,
+    require_subtype: bool,
+) {
     let predictions: Vec<_> = predictions.collect();
     let mut candidates = Vec::new();
     for (prediction_index, prediction) in predictions.iter().enumerate() {
         for (gold_index, expected) in gold.iter().enumerate() {
-            if prediction.category != expected.category {
+            if prediction.category != expected.category
+                || (require_subtype
+                    && prediction.category == IssueCategory::Grammar
+                    && prediction.grammar_subtype != expected.grammar_subtype)
+            {
                 continue;
             }
             let overlap_start = prediction.char_start.max(expected.char_start);
             let overlap_end = prediction.char_end.min(expected.char_end);
-            if overlap_start < overlap_end {
-                candidates.push((overlap_end - overlap_start, prediction_index, gold_index));
+            let overlap = overlap_end.saturating_sub(overlap_start);
+            let prediction_len = prediction.char_end.saturating_sub(prediction.char_start);
+            let gold_len = expected.char_end.saturating_sub(expected.char_start);
+            if overlap > 0
+                && u64::from(overlap) * 2 >= u64::from(prediction_len)
+                && u64::from(overlap) * 2 >= u64::from(gold_len)
+            {
+                candidates.push((overlap, prediction_index, gold_index));
             }
         }
     }
@@ -241,6 +309,21 @@ fn accumulate<'a>(
     }
     counts.false_positive += (predictions.len() - matched_predictions.len()) as u64;
     counts.false_negative += (gold.len() - matched_gold.len()) as u64;
+}
+
+fn grammar_subtypes() -> [GrammarSubtype; 10] {
+    [
+        GrammarSubtype::WordOrder,
+        GrammarSubtype::Collocation,
+        GrammarSubtype::MissingComponent,
+        GrammarSubtype::RedundantComponent,
+        GrammarSubtype::MissingOrRedundantComponent,
+        GrammarSubtype::MixedStructure,
+        GrammarSubtype::Ambiguity,
+        GrammarSubtype::Illogical,
+        GrammarSubtype::Conjunction,
+        GrammarSubtype::WordMisuse,
+    ]
 }
 
 fn metrics(counts: Counts) -> Metrics {
@@ -281,18 +364,21 @@ mod tests {
     fn overlapping_predictions_are_matched_one_to_one() {
         let gold = vec![GoldIssue {
             category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
             char_start: 5,
             char_end: 10,
         }];
         let predictions = [
             Prediction {
                 category: IssueCategory::Grammar,
+                grammar_subtype: Some(GrammarSubtype::Collocation),
                 level: IssueLevel::Confirmed,
                 char_start: 5,
                 char_end: 8,
             },
             Prediction {
                 category: IssueCategory::Grammar,
+                grammar_subtype: Some(GrammarSubtype::Collocation),
                 level: IssueLevel::Confirmed,
                 char_start: 7,
                 char_end: 10,
@@ -303,5 +389,71 @@ mod tests {
         assert_eq!(counts.true_positive, 1);
         assert_eq!(counts.false_positive, 1);
         assert_eq!(counts.false_negative, 0);
+    }
+
+    #[test]
+    fn wrong_grammar_subtype_is_not_a_match() {
+        let gold = [GoldIssue {
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            char_start: 5,
+            char_end: 10,
+        }];
+        let predictions = [Prediction {
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::WordOrder),
+            level: IssueLevel::Confirmed,
+            char_start: 5,
+            char_end: 10,
+        }];
+        let mut strict = Counts::default();
+        accumulate(&gold, predictions.iter(), &mut strict);
+        assert_eq!(
+            (
+                strict.true_positive,
+                strict.false_positive,
+                strict.false_negative
+            ),
+            (0, 1, 1)
+        );
+        let mut detection = Counts::default();
+        accumulate_with_subtype_policy(&gold, predictions.iter(), &mut detection, false);
+        assert_eq!(detection.true_positive, 1);
+    }
+
+    #[test]
+    fn tiny_overlap_or_overbroad_span_is_not_a_match() {
+        let gold = [GoldIssue {
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            char_start: 5,
+            char_end: 15,
+        }];
+        let predictions = [
+            Prediction {
+                category: IssueCategory::Grammar,
+                grammar_subtype: Some(GrammarSubtype::Collocation),
+                level: IssueLevel::Confirmed,
+                char_start: 14,
+                char_end: 20,
+            },
+            Prediction {
+                category: IssueCategory::Grammar,
+                grammar_subtype: Some(GrammarSubtype::Collocation),
+                level: IssueLevel::Confirmed,
+                char_start: 0,
+                char_end: 40,
+            },
+        ];
+        let mut counts = Counts::default();
+        accumulate(&gold, predictions.iter(), &mut counts);
+        assert_eq!(
+            (
+                counts.true_positive,
+                counts.false_positive,
+                counts.false_negative
+            ),
+            (0, 2, 1)
+        );
     }
 }

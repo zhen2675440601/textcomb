@@ -249,6 +249,7 @@ pub fn resolve_candidates(
                     local_start,
                     local_start + quote_len,
                     analysis_profile,
+                    candidate.category,
                 ),
             })
         })
@@ -307,6 +308,7 @@ fn overlaps_protected_span(
     start: usize,
     end: usize,
     analysis_profile: AnalysisProfile,
+    category: IssueCategory,
 ) -> bool {
     static BASE_PROTECTED: OnceLock<Regex> = OnceLock::new();
     static ACADEMIC_PROTECTED: OnceLock<Regex> = OnceLock::new();
@@ -346,12 +348,27 @@ fn overlaps_protected_span(
         )
         .expect("financial protected span regex is valid")
     });
-    regex_overlaps(base, text, start, end)
+    let matches = |regex: &Regex| {
+        if category == IssueCategory::Grammar {
+            regex_covers(regex, text, start, end)
+        } else {
+            regex_overlaps(regex, text, start, end)
+        }
+    };
+    matches(base)
         || match analysis_profile {
             AnalysisProfile::General => false,
-            AnalysisProfile::Academic => regex_overlaps(academic, text, start, end),
-            AnalysisProfile::Financial => regex_overlaps(financial, text, start, end),
+            AnalysisProfile::Academic => matches(academic),
+            AnalysisProfile::Financial => matches(financial),
         }
+}
+
+fn regex_covers(regex: &Regex, text: &str, start: usize, end: usize) -> bool {
+    regex.find_iter(text).any(|found| {
+        let match_start = text[..found.start()].chars().count();
+        let match_end = match_start + found.as_str().chars().count();
+        match_start <= start && match_end >= end
+    })
 }
 
 fn regex_overlaps(regex: &Regex, text: &str, start: usize, end: usize) -> bool {
@@ -378,22 +395,33 @@ pub fn finalize_issues(
         else {
             continue;
         };
-        let effective_confidence = candidate.candidate_confidence.min(verdict.confidence);
         if verdict.verdict == VerificationVerdict::Rejected
-            || effective_confidence < suspected_threshold
+            || verdict.confidence < suspected_threshold
         {
             continue;
         }
-        let mut level = if effective_confidence >= confirmed_threshold
+        let category = verdict.category.unwrap_or(candidate.category);
+        let grammar_subtype = if verdict.category.is_some() {
+            verdict.grammar_subtype
+        } else {
+            candidate.grammar_subtype
+        };
+        let classification_changed = verdict.category.is_some()
+            && (category != candidate.category
+                || (category == IssueCategory::Grammar
+                    && grammar_subtype != candidate.grammar_subtype));
+        let mut level = if candidate.candidate_confidence >= confirmed_threshold
+            && verdict.confidence >= confirmed_threshold
             && verdict.verdict == VerificationVerdict::Confirmed
         {
             IssueLevel::Confirmed
         } else {
             IssueLevel::Suspected
         };
-        if candidate.category == IssueCategory::Paragraph
+        if classification_changed
+            || category == IssueCategory::Paragraph
             || candidate.protected
-            || requires_contextual_review(candidate)
+            || requires_contextual_review(category, grammar_subtype)
         {
             level = IssueLevel::Suspected;
         }
@@ -402,7 +430,9 @@ pub fn finalize_issues(
             .evidence_source_ids
             .iter()
             .filter_map(|source_id| {
-                if seen_sources.insert(source_id.clone()) {
+                if seen_sources.insert(source_id.clone())
+                    && evidence_allowed_for_category(source_id, category)
+                {
                     evidence.get(source_id).cloned()
                 } else {
                     None
@@ -416,22 +446,14 @@ pub fn finalize_issues(
         )?;
         issues.push(Issue {
             id: Uuid::new_v4(),
-            category: candidate.category,
-            grammar_subtype: candidate.grammar_subtype,
+            category,
+            grammar_subtype,
             level,
             location,
             original_text: candidate.quote.clone(),
-            reason: if verdict.reason.trim().is_empty() {
-                candidate.reason.clone()
-            } else {
-                verdict.reason
-            },
-            suggestion: if verdict.suggestion.trim().is_empty() {
-                candidate.suggestion.clone()
-            } else {
-                verdict.suggestion
-            },
-            confidence: effective_confidence.min(100),
+            reason: verdict.reason,
+            suggestion: verdict.suggestion,
+            confidence: verdict.confidence.min(100),
             evidence_refs,
             feedback: None,
         });
@@ -441,14 +463,25 @@ pub fn finalize_issues(
 
 /// These diagnoses often depend on intent or discourse outside the sentence.
 /// Keep them reviewable without presenting an AI inference as a mandatory edit.
-fn requires_contextual_review(candidate: &ResolvedCandidate) -> bool {
-    candidate.category == IssueCategory::Grammar
+fn requires_contextual_review(
+    category: IssueCategory,
+    grammar_subtype: Option<GrammarSubtype>,
+) -> bool {
+    category == IssueCategory::Grammar
         && matches!(
-            candidate.grammar_subtype,
+            grammar_subtype,
             Some(
                 GrammarSubtype::Ambiguity | GrammarSubtype::Illogical | GrammarSubtype::WordMisuse
             )
         )
+}
+
+fn evidence_allowed_for_category(source_id: &str, category: IssueCategory) -> bool {
+    matches!(
+        (source_id, category),
+        ("gb-t-15834-2011", IssueCategory::Punctuation)
+            | ("standard-chinese-characters-2013", IssueCategory::Typo)
+    )
 }
 
 pub fn deduplicate_issues(mut issues: Vec<Issue>) -> Vec<Issue> {
@@ -590,7 +623,8 @@ mod tests {
             text,
             formula_start,
             formula_end,
-            AnalysisProfile::General
+            AnalysisProfile::General,
+            IssueCategory::Typo
         ));
         for quote in ["12-14", "10.1234/example.1"] {
             let (start, end) = range(quote);
@@ -598,13 +632,15 @@ mod tests {
                 text,
                 start,
                 end,
-                AnalysisProfile::Academic
+                AnalysisProfile::Academic,
+                IssueCategory::Typo
             ));
             assert!(!overlaps_protected_span(
                 text,
                 start,
                 end,
-                AnalysisProfile::General
+                AnalysisProfile::General,
+                IssueCategory::Typo
             ));
         }
         let (percentage_start, percentage_end) = range("12.5%");
@@ -612,13 +648,30 @@ mod tests {
             text,
             percentage_start,
             percentage_end,
-            AnalysisProfile::Financial
+            AnalysisProfile::Financial,
+            IssueCategory::Typo
         ));
         assert!(!overlaps_protected_span(
             text,
             percentage_start,
             percentage_end,
-            AnalysisProfile::General
+            AnalysisProfile::General,
+            IssueCategory::Typo
+        ));
+        let sentence = "2025年，公司的经营状况得到了提高。";
+        assert!(!overlaps_protected_span(
+            sentence,
+            0,
+            sentence.chars().count(),
+            AnalysisProfile::Financial,
+            IssueCategory::Grammar
+        ));
+        assert!(overlaps_protected_span(
+            sentence,
+            0,
+            5,
+            AnalysisProfile::Financial,
+            IssueCategory::Typo
         ));
     }
 
@@ -653,6 +706,8 @@ mod tests {
             vec![candidate],
             vec![VerifiedCandidate {
                 candidate_index: 0,
+                category: None,
+                grammar_subtype: None,
                 verdict: VerificationVerdict::Confirmed,
                 confidence: 100,
                 reason: "上下文不足以排除其他读法".to_owned(),
@@ -665,6 +720,118 @@ mod tests {
         )
         .unwrap();
         assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].level, IssueLevel::Suspected);
+    }
+
+    #[test]
+    fn reviewer_can_rescue_low_scored_candidate_only_as_suspected() {
+        let document = ExtractedDocument {
+            format: textcomb_domain::DocumentFormat::Txt,
+            text: "他心情很繁重。".to_owned(),
+            segments: vec![crate::documents::SourceSegment {
+                char_start: 0,
+                char_end: 7,
+                page: None,
+                line: Some(1),
+                paragraph_index: 0,
+            }],
+            char_count: 7,
+        };
+        let candidate = ResolvedCandidate {
+            candidate_index: 0,
+            source_start: 1,
+            source_end: 6,
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            quote: "心情很繁重".to_owned(),
+            reason: "初检理由".to_owned(),
+            suggestion: "初检建议".to_owned(),
+            candidate_confidence: 30,
+            protected: false,
+        };
+        let reviewed = VerifiedCandidate {
+            candidate_index: 0,
+            category: Some(IssueCategory::Grammar),
+            grammar_subtype: Some(GrammarSubtype::WordOrder),
+            verdict: VerificationVerdict::Confirmed,
+            confidence: 90,
+            reason: "心情与繁重搭配不当".to_owned(),
+            suggestion: "心情很沉重".to_owned(),
+            evidence_source_ids: Vec::new(),
+        };
+        let issues = finalize_issues(
+            &document,
+            vec![candidate],
+            vec![reviewed],
+            &HashMap::new(),
+            80,
+            50,
+        )
+        .unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].level, IssueLevel::Suspected);
+        assert_eq!(issues[0].confidence, 90);
+        assert_eq!(issues[0].grammar_subtype, Some(GrammarSubtype::WordOrder));
+    }
+
+    #[test]
+    fn evidence_source_must_match_issue_category() {
+        assert!(evidence_allowed_for_category(
+            "gb-t-15834-2011",
+            IssueCategory::Punctuation
+        ));
+        assert!(!evidence_allowed_for_category(
+            "gb-t-15834-2011",
+            IssueCategory::Grammar
+        ));
+    }
+
+    #[test]
+    fn independent_reclassification_is_reviewable_but_not_confirmed() {
+        let document = ExtractedDocument {
+            format: textcomb_domain::DocumentFormat::Txt,
+            text: "他心情很繁重。".to_owned(),
+            segments: vec![crate::documents::SourceSegment {
+                char_start: 0,
+                char_end: 7,
+                page: None,
+                line: Some(1),
+                paragraph_index: 0,
+            }],
+            char_count: 7,
+        };
+        let candidate = ResolvedCandidate {
+            candidate_index: 0,
+            source_start: 1,
+            source_end: 6,
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            quote: "心情很繁重".to_owned(),
+            reason: "搭配".to_owned(),
+            suggestion: "心情很沉重".to_owned(),
+            candidate_confidence: 95,
+            protected: false,
+        };
+        let verdict = VerifiedCandidate {
+            candidate_index: 0,
+            category: Some(IssueCategory::Grammar),
+            grammar_subtype: Some(GrammarSubtype::WordMisuse),
+            verdict: VerificationVerdict::Confirmed,
+            confidence: 95,
+            reason: "复核后认为词语使用不当".to_owned(),
+            suggestion: "心情很沉重".to_owned(),
+            evidence_source_ids: Vec::new(),
+        };
+        let issues = finalize_issues(
+            &document,
+            vec![candidate],
+            vec![verdict],
+            &HashMap::new(),
+            80,
+            50,
+        )
+        .unwrap();
+        assert_eq!(issues[0].grammar_subtype, Some(GrammarSubtype::WordMisuse));
         assert_eq!(issues[0].level, IssueLevel::Suspected);
     }
 }

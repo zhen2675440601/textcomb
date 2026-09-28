@@ -766,26 +766,34 @@ pub async fn mark_chunk_verifying(
     worker_id: &str,
     chunk_index: usize,
 ) -> CoreResult<()> {
-    let mut transaction = pool.begin().await?;
-    let chunk_update = sqlx::query(
-        "UPDATE analysis_chunks SET status = 'verifying', updated_at = now() WHERE job_id = $1 AND chunk_index = $2 AND EXISTS (SELECT 1 FROM analysis_jobs WHERE id = $1 AND worker_id = $3 AND status IN ('extracting','analyzing','verifying','merging','rendering'))",
+    let result = sqlx::query(
+        r#"
+        WITH updated_chunk AS (
+            UPDATE analysis_chunks
+            SET status = 'verifying', updated_at = now()
+            WHERE job_id = $1 AND chunk_index = $2
+              AND EXISTS (
+                  SELECT 1 FROM analysis_jobs
+                  WHERE id = $1 AND worker_id = $3
+                    AND status IN ('extracting','analyzing','verifying','merging','rendering')
+              )
+            RETURNING job_id
+        )
+        UPDATE analysis_jobs
+        SET status = 'verifying', stage = 'verifying'
+        WHERE id = $1 AND worker_id = $3
+          AND status IN ('analyzing','verifying')
+          AND EXISTS (SELECT 1 FROM updated_chunk)
+        "#,
     )
     .bind(job_id)
     .bind(chunk_index as i32)
     .bind(worker_id)
-    .execute(&mut *transaction)
+    .execute(pool)
     .await?;
-    if chunk_update.rows_affected() != 1 {
+    if result.rows_affected() != 1 {
         return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
     }
-    sqlx::query(
-        "UPDATE analysis_jobs SET status = 'verifying', stage = 'verifying' WHERE id = $1 AND worker_id = $2 AND status IN ('analyzing','verifying')",
-    )
-    .bind(job_id)
-    .bind(worker_id)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
     Ok(())
 }
 
@@ -1025,7 +1033,16 @@ async fn insert_issue(
 
 pub async fn confirm_document_file_removed(pool: &PgPool, path: &Path) -> CoreResult<()> {
     sqlx::query(
-        "UPDATE documents SET storage_path = NULL, input_expires_at = NULL WHERE storage_path = $1",
+        r#"
+        UPDATE documents AS document
+        SET storage_path = NULL, input_expires_at = NULL,
+            extracted_text = CASE WHEN EXISTS (
+                SELECT 1 FROM analysis_jobs AS job
+                JOIN reports AS report ON report.job_id = job.id
+                WHERE job.document_id = document.id AND report.expires_at > now()
+            ) THEN document.extracted_text ELSE NULL END
+        WHERE document.storage_path = $1
+        "#,
     )
     .bind(path.to_string_lossy().as_ref())
     .execute(pool)
@@ -1179,10 +1196,16 @@ pub async fn cleanup_expired(pool: &PgPool) -> CoreResult<Vec<CleanupTarget>> {
     .await?;
     sqlx::query(
         r#"
-        UPDATE documents SET input_expires_at = NULL
-        WHERE storage_path IS NULL
-          AND input_expires_at IS NOT NULL
-          AND input_expires_at < now()
+        UPDATE documents AS document
+        SET input_expires_at = NULL,
+            extracted_text = CASE WHEN EXISTS (
+                SELECT 1 FROM analysis_jobs AS job
+                JOIN reports AS report ON report.job_id = job.id
+                WHERE job.document_id = document.id AND report.expires_at > now()
+            ) THEN document.extracted_text ELSE NULL END
+        WHERE document.storage_path IS NULL
+          AND document.input_expires_at IS NOT NULL
+          AND document.input_expires_at < now()
         "#,
     )
     .execute(pool)

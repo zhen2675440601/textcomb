@@ -5,6 +5,8 @@ import type {
   AnalysisProfile,
   DocumentRecord,
   FeedbackVerdict,
+  IssueCategory,
+  MissedIssueFeedback,
   ModelProfile,
   ProviderKind,
   ProblemDetails,
@@ -114,6 +116,17 @@ export const api = {
     if (end !== undefined) params.set("end", String(end));
     return request<ReportSource>(`/reports/${id}/source?${params.toString()}`);
   },
+  addMissedIssue: (id: string, input: {
+    category: IssueCategory;
+    char_start: number;
+    char_end: number;
+    note: string;
+  }) => request<MissedIssueFeedback>(`/reports/${id}/misses`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  deleteMissedIssue: (id: string, missId: string) =>
+    request<void>(`/reports/${id}/misses/${missId}`, { method: "DELETE" }),
   deleteReport: (id: string) =>
     request<void>(`/reports/${id}`, { method: "DELETE" }),
   feedback: (issueId: string, verdict: FeedbackVerdict, note?: string) =>

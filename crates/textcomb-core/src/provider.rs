@@ -90,6 +90,26 @@ pub struct CandidateResponse {
     pub issues: Vec<CandidateIssue>,
 }
 
+// The second pass sees locations, but not the first pass's diagnosis.
+#[derive(Serialize)]
+struct VerificationTarget<'a> {
+    quote: &'a str,
+    context_before: Option<&'a str>,
+    context_after: Option<&'a str>,
+}
+
+fn verification_targets_json(candidates: &[CandidateIssue]) -> CoreResult<String> {
+    let targets: Vec<_> = candidates
+        .iter()
+        .map(|candidate| VerificationTarget {
+            quote: &candidate.quote,
+            context_before: candidate.context_before.as_deref(),
+            context_after: candidate.context_after.as_deref(),
+        })
+        .collect();
+    Ok(serde_json::to_string(&targets)?)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationVerdict {
@@ -102,6 +122,10 @@ pub enum VerificationVerdict {
 #[serde(deny_unknown_fields)]
 pub struct VerifiedCandidate {
     pub candidate_index: usize,
+    #[serde(default)]
+    pub category: Option<IssueCategory>,
+    #[serde(default)]
+    pub grammar_subtype: Option<GrammarSubtype>,
     pub verdict: VerificationVerdict,
     pub confidence: u8,
     #[serde(default)]
@@ -369,7 +393,7 @@ impl AnalysisProvider for JsonProtocolProvider {
         evidence_ids: &[String],
     ) -> CoreResult<ProviderResult<VerificationResponse>> {
         let candidate_count = candidates.len();
-        let candidates_json = serde_json::to_string(candidates)?;
+        let candidates_json = verification_targets_json(candidates)?;
         let result = self
             .call(
                 &self.profile.verifier_model,
@@ -609,6 +633,12 @@ fn validate_verification(
             || verdict.confidence > 100
             || verdict.reason.chars().count() > 2_000
             || verdict.suggestion.chars().count() > 2_000
+            || (verdict.verdict != VerificationVerdict::Rejected
+                && (verdict.reason.trim().is_empty() || verdict.suggestion.trim().is_empty()))
+            || verdict.category.is_some_and(|category| {
+                (category == IssueCategory::Grammar) != verdict.grammar_subtype.is_some()
+            })
+            || (verdict.category.is_none() && verdict.grammar_subtype.is_some())
             || !evidence_is_valid
         {
             return Err(invalid_output("复核结果不符合字段约束"));
@@ -918,9 +948,33 @@ mod tests {
     }
 
     #[test]
+    fn verification_payload_excludes_initial_judgment() {
+        let candidate = CandidateIssue {
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            quote: "心情很繁重".to_owned(),
+            context_before: Some("他".to_owned()),
+            context_after: None,
+            reason: "初检理由".to_owned(),
+            suggestion: "初检建议".to_owned(),
+            confidence: 20,
+            evidence_source_ids: vec!["unsupported".to_owned()],
+        };
+        let payload = verification_targets_json(&[candidate]).unwrap();
+        assert!(payload.contains("心情很繁重"));
+        assert!(!payload.contains("初检理由"));
+        assert!(!payload.contains("初检建议"));
+        assert!(!payload.contains("confidence"));
+        assert!(!payload.contains("grammar_subtype"));
+        assert!(!payload.contains("unsupported"));
+    }
+
+    #[test]
     fn rejects_duplicate_verdict_indexes() {
         let verdict = VerifiedCandidate {
             candidate_index: 0,
+            category: None,
+            grammar_subtype: None,
             verdict: VerificationVerdict::Confirmed,
             confidence: 90,
             reason: "测试".to_owned(),
@@ -932,6 +986,26 @@ mod tests {
         };
         assert_eq!(
             validate_verification(&response, 2).unwrap_err().code(),
+            ErrorCode::ModelOutputInvalid
+        );
+    }
+
+    #[test]
+    fn rejects_accepted_verdict_without_independent_explanation() {
+        let response = VerificationResponse {
+            verdicts: vec![VerifiedCandidate {
+                candidate_index: 0,
+                category: None,
+                grammar_subtype: None,
+                verdict: VerificationVerdict::Confirmed,
+                confidence: 90,
+                reason: String::new(),
+                suggestion: "心情很沉重".to_owned(),
+                evidence_source_ids: vec![],
+            }],
+        };
+        assert_eq!(
+            validate_verification(&response, 1).unwrap_err().code(),
             ErrorCode::ModelOutputInvalid
         );
     }

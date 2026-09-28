@@ -44,20 +44,9 @@ pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
     let text = String::from_utf8(output.stdout).map_err(|_| {
         CoreError::public(ErrorCode::ExtractionFailed, "PDF 提取结果不是有效 UTF-8")
     })?;
-    if text
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .count()
-        < 10
-    {
-        return Err(CoreError::public(
-            ErrorCode::PdfScanned,
-            "PDF 没有足够的可提取文字，可能是扫描件",
-        ));
-    }
-
+    let pages = validate_text_pages(&text)?;
     let mut lines = Vec::new();
-    for (page_index, page) in text.split('\u{000c}').enumerate() {
+    for (page_index, page) in pages.into_iter().enumerate() {
         let page_lines: Vec<&str> = page.lines().collect();
         for (line_index, line) in page_lines.iter().enumerate() {
             lines.push(SourceLine {
@@ -72,4 +61,57 @@ pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
         lines.pop();
     }
     Ok(build_document(DocumentFormat::Pdf, lines))
+}
+
+fn validate_text_pages(text: &str) -> CoreResult<Vec<&str>> {
+    let mut pages: Vec<&str> = text.split('\u{000c}').collect();
+    // pdftotext normally appends a form feed after the final page.
+    if pages.last().is_some_and(|page| page.trim().is_empty()) {
+        pages.pop();
+    }
+    for (index, page) in pages.iter().enumerate() {
+        if page
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count()
+            < 10
+        {
+            return Err(CoreError::public(
+                ErrorCode::PdfScanned,
+                format!(
+                    "PDF 第 {} 页可提取文字不足，无法确认已覆盖全文；请改用 TXT 或 DOCX",
+                    index + 1
+                ),
+            ));
+        }
+    }
+    if pages.is_empty() {
+        return Err(CoreError::public(
+            ErrorCode::PdfScanned,
+            "PDF 没有可提取的文字",
+        ));
+    }
+    Ok(pages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_a_scanned_page_after_a_text_cover() {
+        let error = validate_text_pages("这是一页真实的文章正文。\u{000c}\u{000c}").unwrap_err();
+        assert_eq!(error.code(), ErrorCode::PdfScanned);
+        assert!(error.safe_message().contains("第 2 页"));
+    }
+
+    #[test]
+    fn ignores_trailing_form_feed_after_last_text_page() {
+        assert_eq!(
+            validate_text_pages("这是一页真实的文章正文。\u{000c}")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }

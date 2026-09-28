@@ -7,6 +7,7 @@ import type {
   Issue,
   IssueCategory,
   IssueLevel,
+  MissedIssueFeedback,
   Report,
   ReportSource,
 } from "@/api/types";
@@ -26,7 +27,14 @@ const sourceOpen = ref(false);
 const sourceLoading = ref(false);
 const sourceError = ref("");
 const source = ref<ReportSource | null>(null);
+const sourceTextElement = ref<HTMLElement | null>(null);
 const selectedIssueId = ref<string | null>(null);
+const sourceJump = ref<number | null>(null);
+const missedSelection = ref<{ char_start: number; char_end: number; quote: string } | null>(null);
+const missedCategory = ref<IssueCategory>("grammar");
+const missedNote = ref("");
+const missedError = ref("");
+const savingMiss = ref(false);
 let sourceRequestVersion = 0;
 
 const reportId = String(route.params.id);
@@ -124,6 +132,7 @@ function toggle(issue: Issue) {
   if (next.has(issue.id)) next.delete(issue.id);
   else next.add(issue.id);
   expanded.value = next;
+  if (sourceOpen.value) void openSource(issue);
 }
 
 async function openSource(issue?: Issue) {
@@ -156,6 +165,85 @@ async function openSource(issue?: Issue) {
     }
   } finally {
     if (requestVersion === sourceRequestVersion) sourceLoading.value = false;
+  }
+}
+
+async function browseSource(start: number) {
+  if (!source.value) return;
+  selectedIssueId.value = null;
+  missedSelection.value = null;
+  const requestVersion = ++sourceRequestVersion;
+  sourceLoading.value = true;
+  sourceError.value = "";
+  try {
+    const next = await api.reportSource(reportId, Math.max(0, start), Math.max(0, start) + 8_000);
+    if (requestVersion === sourceRequestVersion) source.value = next;
+  } catch (cause) {
+    if (requestVersion === sourceRequestVersion) {
+      sourceError.value = cause instanceof ApiProblem ? cause.message : "无法读取分析原文";
+    }
+  } finally {
+    if (requestVersion === sourceRequestVersion) sourceLoading.value = false;
+  }
+}
+
+function jumpToSource() {
+  if (!source.value || sourceJump.value === null) return;
+  const position = Math.min(Math.max(Math.floor(sourceJump.value) - 1, 0), source.value.char_count - 1);
+  void browseSource(position);
+}
+
+function captureMissedSelection() {
+  const element = sourceTextElement.value;
+  const selection = window.getSelection();
+  if (!element || !source.value || !selection || selection.rangeCount === 0) return;
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
+    missedError.value = "请先在分析原文中选中漏检的文字";
+    return;
+  }
+  const before = document.createRange();
+  before.selectNodeContents(element);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = source.value.char_start + Array.from(before.toString()).length;
+  const quote = range.toString();
+  const end = start + Array.from(quote).length;
+  if (start >= end || end - start > 300) {
+    missedError.value = "请选择不超过 300 字的原文片段";
+    return;
+  }
+  missedSelection.value = { char_start: start, char_end: end, quote };
+  missedError.value = "";
+}
+
+async function saveMissedIssue() {
+  if (!report.value || !missedSelection.value || !missedNote.value.trim()) return;
+  savingMiss.value = true;
+  missedError.value = "";
+  try {
+    const miss = await api.addMissedIssue(reportId, {
+      ...missedSelection.value,
+      category: missedCategory.value,
+      note: missedNote.value.trim(),
+    });
+    report.value.missed_issues = [...(report.value.missed_issues ?? []), miss];
+    missedSelection.value = null;
+    missedNote.value = "";
+  } catch (cause) {
+    missedError.value = cause instanceof ApiProblem ? cause.message : "漏检反馈保存失败";
+  } finally {
+    savingMiss.value = false;
+  }
+}
+
+async function removeMissedIssue(miss: MissedIssueFeedback) {
+  if (!report.value) return;
+  missedError.value = "";
+  try {
+    await api.deleteMissedIssue(reportId, miss.id);
+    report.value.missed_issues = (report.value.missed_issues ?? []).filter((item) => item.id !== miss.id);
+  } catch (cause) {
+    missedError.value = cause instanceof ApiProblem ? cause.message : "漏检反馈删除失败";
   }
 }
 
@@ -406,7 +494,7 @@ onMounted(load);
                 <p>{{ issue.suggestion }}</p>
               </div>
               <div v-if="issue.evidence_refs.length" class="evidence-list">
-                <span>参考依据</span>
+                <span>参考资料（具体条款未核对）</span>
                 <a
                   v-for="evidence in issue.evidence_refs"
                   :key="evidence.source_id"
@@ -479,12 +567,46 @@ onMounted(load);
             <p>{{ sourceError }}</p>
           </div>
           <div v-else-if="source" class="source-scroll">
+            <div class="source-navigation">
+              <button type="button" :disabled="source.char_start === 0" @click="browseSource(Math.max(0, source.char_start - 8_000))">上一段</button>
+              <button type="button" :disabled="source.char_end >= source.char_count" @click="browseSource(source.char_end)">下一段</button>
+              <label>跳转到字符
+                <input v-model.number="sourceJump" type="number" min="1" :max="source.char_count" />
+              </label>
+              <button type="button" @click="jumpToSource">跳转</button>
+            </div>
             <p class="source-meta">
               {{ source.original_name }} ·
               {{ (source.char_start + 1).toLocaleString("zh-CN") }}–{{ source.char_end.toLocaleString("zh-CN") }} /
               {{ source.char_count.toLocaleString("zh-CN") }} 字符
             </p>
-            <pre class="source-text"><template v-if="sourceSelection?.selected">{{ sourceSelection.before }}<mark id="report-source-selection">{{ sourceSelection.selected }}</mark>{{ sourceSelection.after }}</template><template v-else>{{ source.text }}</template></pre>
+            <pre ref="sourceTextElement" class="source-text"><template v-if="sourceSelection?.selected">{{ sourceSelection.before }}<mark id="report-source-selection">{{ sourceSelection.selected }}</mark>{{ sourceSelection.after }}</template><template v-else>{{ source.text }}</template></pre>
+            <div class="missed-review">
+              <button class="text-button" type="button" @click="captureMissedSelection">选中文字并标记漏检</button>
+              <p v-if="missedError" class="alert error" role="alert">{{ missedError }}</p>
+              <div v-if="missedSelection" class="missed-form">
+                <p>漏检片段：“{{ missedSelection.quote }}”</p>
+                <label class="field">问题类型
+                  <select v-model="missedCategory">
+                    <option value="typo">错字</option>
+                    <option value="punctuation">标点</option>
+                    <option value="grammar">病句</option>
+                    <option value="paragraph">分段</option>
+                  </select>
+                </label>
+                <label class="field">说明
+                  <textarea v-model="missedNote" rows="3" maxlength="1000" placeholder="说明这里遗漏了什么问题" />
+                </label>
+                <button class="button primary compact" type="button" :disabled="savingMiss || !missedNote.trim()" @click="saveMissedIssue">保存漏检反馈</button>
+              </div>
+              <div v-if="report.missed_issues?.length" class="missed-list">
+                <h4>已标记的漏检（{{ report.missed_issues.length }}）</h4>
+                <p v-for="miss in report.missed_issues" :key="miss.id">
+                  {{ categoryLabels[miss.category] }} · “{{ miss.quote }}”：{{ miss.note }}
+                  <button class="text-button" type="button" @click="removeMissedIssue(miss)">删除</button>
+                </p>
+              </div>
+            </div>
           </div>
         </aside>
       </div>

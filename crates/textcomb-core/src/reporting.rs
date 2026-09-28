@@ -1,6 +1,8 @@
 use crate::error::{CoreError, CoreResult, ErrorCode};
 use std::path::{Path, PathBuf};
-use textcomb_domain::{AnalysisProfile, Issue, IssueLevel, ReportV1, SourceLocation};
+use textcomb_domain::{
+    AnalysisProfile, FeedbackVerdict, Issue, IssueLevel, ReportV1, SourceLocation,
+};
 use tokio::{fs, process::Command, time};
 
 pub fn to_markdown(report: &ReportV1) -> String {
@@ -23,8 +25,7 @@ pub fn to_markdown(report: &ReportV1) -> String {
         report.analysis.prompt_version
     ));
     if report.issues.is_empty() {
-        output.push_str("未发现需要报告的问题。最终结果仍请作者自行审核。\n");
-        return output;
+        output.push_str("未发现需要报告的问题。最终结果仍请作者自行审核。\n\n");
     }
     for (index, issue) in report.issues.iter().enumerate() {
         output.push_str(&format!(
@@ -38,14 +39,31 @@ pub fn to_markdown(report: &ReportV1) -> String {
         output.push_str(&format!("- 原因：{}\n", issue.reason));
         output.push_str(&format!("- 建议：{}\n", issue.suggestion));
         output.push_str(&format!("- 置信度：{}%\n", issue.confidence));
+        if let Some(feedback) = issue.feedback {
+            output.push_str(&format!("- 作者审核：{}\n", feedback_label(feedback)));
+        }
         if !issue.evidence_refs.is_empty() {
-            output.push_str("- 依据：\n");
+            output.push_str("- 参考资料（具体条款未核对）：\n");
             for evidence in &issue.evidence_refs {
                 output.push_str(&format!(
                     "  - [{} {}]({})\n",
                     evidence.title, evidence.revision, evidence.source_url
                 ));
             }
+        }
+        output.push('\n');
+    }
+    if !report.missed_issues.is_empty() {
+        output.push_str("## 作者标记的漏检\n\n");
+        for miss in &report.missed_issues {
+            output.push_str(&format!(
+                "- {}（字符 {}–{}）：{}；说明：{}\n",
+                miss.category.as_str(),
+                miss.char_start,
+                miss.char_end,
+                miss.quote,
+                miss.note
+            ));
         }
         output.push('\n');
     }
@@ -87,8 +105,11 @@ pub fn to_typst(report: &ReportV1) -> String {
             typst_escape(&issue.suggestion),
             issue.confidence
         ));
+        if let Some(feedback) = issue.feedback {
+            output.push_str(&format!("- *作者审核：* {}\n", feedback_label(feedback)));
+        }
         if !issue.evidence_refs.is_empty() {
-            output.push_str("- *依据：*\n");
+            output.push_str("- *参考资料（具体条款未核对）：*\n");
             for evidence in &issue.evidence_refs {
                 output.push_str(&format!(
                     "  - #link(\"{}\")[{} {}]\n",
@@ -97,6 +118,20 @@ pub fn to_typst(report: &ReportV1) -> String {
                     typst_escape(&evidence.revision)
                 ));
             }
+        }
+        output.push('\n');
+    }
+    if !report.missed_issues.is_empty() {
+        output.push_str("== 作者标记的漏检\n\n");
+        for miss in &report.missed_issues {
+            output.push_str(&format!(
+                "- {}（字符 {}–{}）：#quote[{}]；说明：{}\n",
+                typst_escape(miss.category.as_str()),
+                miss.char_start,
+                miss.char_end,
+                typst_escape(&miss.quote),
+                typst_escape(&miss.note)
+            ));
         }
         output.push('\n');
     }
@@ -164,6 +199,14 @@ fn level_label(level: IssueLevel) -> &'static str {
     match level {
         IssueLevel::Confirmed => "正式问题",
         IssueLevel::Suspected => "疑似问题",
+    }
+}
+
+fn feedback_label(feedback: FeedbackVerdict) -> &'static str {
+    match feedback {
+        FeedbackVerdict::Correct => "正确",
+        FeedbackVerdict::Incorrect => "错误",
+        FeedbackVerdict::Disputed => "有争议",
     }
 }
 

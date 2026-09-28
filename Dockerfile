@@ -42,7 +42,14 @@ USER textcomb:textcomb
 ENTRYPOINT ["dumb-init", "--"]
 
 FROM runtime-base AS api
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=typst /bin/typst /usr/local/bin/typst
 COPY --from=rust-builder /out/textcomb-api /usr/local/bin/textcomb-api
+RUN fc-cache -f
+USER textcomb:textcomb
 EXPOSE 8080
 CMD ["textcomb-api"]
 

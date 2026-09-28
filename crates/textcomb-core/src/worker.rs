@@ -486,34 +486,19 @@ impl Worker {
             OffsetDateTime::now_utc(),
         );
         let markdown = reporting::to_markdown(&report);
-        let pdf_path = self.storage.report_pdf_path(report_id);
-        let typst_path = self.storage.temporary_path(report_id, "typ");
         self.check_cancel(job.id, &stop_token).await?;
-        reporting::render_pdf(&report, &pdf_path, &typst_path).await?;
-        if let Err(error) = self.check_cancel(job.id, &stop_token).await {
-            if let Err(remove_error) = self.storage.remove(&pdf_path).await {
-                warn!(path = %pdf_path.display(), error = %remove_error, "failed to remove cancelled report PDF");
-            }
-            return Err(error);
-        }
         let report_expiry =
             OffsetDateTime::now_utc() + ::time::Duration::days(self.config.report_retention_days);
-        let save_result = db::save_report(
+        db::save_report(
             &self.pool,
             worker_id,
             &report,
             job.user_id,
             &markdown,
-            pdf_path.to_str(),
+            None,
             report_expiry,
         )
-        .await;
-        if let Err(error) = save_result {
-            if let Err(remove_error) = self.storage.remove(&pdf_path).await {
-                warn!(path = %pdf_path.display(), error = %remove_error, "failed to remove uncommitted report PDF");
-            }
-            return Err(error);
-        }
+        .await?;
         self.remove_finalized_input(&storage_path).await;
         Ok(())
     }
@@ -904,6 +889,8 @@ mod tests {
         let mut verdicts = vec![
             VerifiedCandidate {
                 candidate_index: 0,
+                category: None,
+                grammar_subtype: None,
                 verdict: crate::provider::VerificationVerdict::Confirmed,
                 confidence: 90,
                 reason: String::new(),
@@ -912,6 +899,8 @@ mod tests {
             },
             VerifiedCandidate {
                 candidate_index: 1,
+                category: None,
+                grammar_subtype: None,
                 verdict: crate::provider::VerificationVerdict::Suspected,
                 confidence: 70,
                 reason: String::new(),

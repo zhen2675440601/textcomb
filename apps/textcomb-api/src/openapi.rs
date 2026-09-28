@@ -235,6 +235,39 @@ async fn specification() -> Json<Value> {
                     }
                 }
             },
+            "/reports/{id}/misses": {
+                "post": {
+                    "tags": ["reports"],
+                    "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": {
+                            "type": "object",
+                            "required": ["category", "char_start", "char_end", "note"],
+                            "properties": {
+                                "category": { "type": "string", "enum": ["typo", "punctuation", "grammar", "paragraph"] },
+                                "char_start": { "type": "integer", "minimum": 0 },
+                                "char_end": { "type": "integer", "minimum": 1 },
+                                "note": { "type": "string", "minLength": 1, "maxLength": 1000 }
+                            }
+                        } } }
+                    },
+                    "responses": { "201": {
+                        "description": "漏检反馈已保存",
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MissedIssueFeedback" } } }
+                    } }
+                }
+            },
+            "/reports/{id}/misses/{miss_id}": {
+                "delete": {
+                    "tags": ["reports"],
+                    "parameters": [
+                        { "$ref": "#/components/parameters/UuidId" },
+                        { "name": "miss_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+                    ],
+                    "responses": { "204": { "description": "漏检反馈已删除" } }
+                }
+            },
             "/reports/{id}/export/{format}": {
                 "get": {
                     "tags": ["reports"],
@@ -586,6 +619,10 @@ async fn specification() -> Json<Value> {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/Issue" }
                         },
+                        "missed_issues": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/MissedIssueFeedback" }
+                        },
                         "complete": { "type": "boolean" },
                         "generated_at": { "type": "string", "format": "date-time" }
                     }
@@ -600,6 +637,19 @@ async fn specification() -> Json<Value> {
                         "char_start": { "type": "integer", "minimum": 0 },
                         "char_end": { "type": "integer", "minimum": 0 },
                         "text": { "type": "string" }
+                    }
+                },
+                "MissedIssueFeedback": {
+                    "type": "object",
+                    "required": ["id", "category", "char_start", "char_end", "quote", "note", "created_at"],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "category": { "type": "string", "enum": ["typo", "punctuation", "grammar", "paragraph"] },
+                        "char_start": { "type": "integer", "minimum": 0 },
+                        "char_end": { "type": "integer", "minimum": 1 },
+                        "quote": { "type": "string" },
+                        "note": { "type": "string" },
+                        "created_at": { "type": "string", "format": "date-time" }
                     }
                 },
                 "Issue": {
