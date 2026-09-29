@@ -1253,12 +1253,14 @@ mod cleanup_tests {
         let completed_job = Uuid::new_v4();
         let report_id = Uuid::new_v4();
 
-        sqlx::query("INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')")
-            .bind(user_id)
-            .bind(format!("cleanup-{user_id}"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')",
+        )
+        .bind(user_id)
+        .bind(format!("cleanup-{user_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
             .bind(profile_id)
             .bind(user_id)
@@ -1299,8 +1301,12 @@ mod cleanup_tests {
         let targets = cleanup_expired(&pool).await.unwrap();
         for target in targets {
             if let CleanupTarget::Document(path) = &target
-                && (path.to_string_lossy().contains(&failed_document.to_string())
-                    || path.to_string_lossy().contains(&report_document.to_string()))
+                && (path
+                    .to_string_lossy()
+                    .contains(&failed_document.to_string())
+                    || path
+                        .to_string_lossy()
+                        .contains(&report_document.to_string()))
             {
                 confirm_cleanup_target(&pool, &target).await.unwrap();
             }

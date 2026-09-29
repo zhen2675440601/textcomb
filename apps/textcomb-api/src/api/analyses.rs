@@ -138,12 +138,11 @@ async fn create(
             "文档不存在、已删除或已完成过分析",
         )));
     }
-    let already_analyzed: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM analysis_jobs WHERE document_id = $1)",
-    )
-    .bind(input.document_id)
-    .fetch_one(&mut *transaction)
-    .await?;
+    let already_analyzed: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM analysis_jobs WHERE document_id = $1)")
+            .bind(input.document_id)
+            .fetch_one(&mut *transaction)
+            .await?;
     if already_analyzed {
         drop(transaction);
         if let Some(key) = idempotency_key.as_ref()

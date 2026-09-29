@@ -2,7 +2,11 @@ use super::{ExtractedDocument, SourceLine, build_document};
 use crate::error::{CoreError, CoreResult, ErrorCode};
 use std::{path::Path, process::Stdio};
 use textcomb_domain::DocumentFormat;
-use tokio::{io::{AsyncRead, AsyncReadExt}, process::Command, time};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    time,
+};
 
 const PDF_EXTRACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_PDF_TEXT_BYTES: usize = 8 * 1024 * 1024;
@@ -29,18 +33,22 @@ pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
         })?;
         let (text, error_text) = tokio::try_join!(
             read_limited(&mut stdout, MAX_PDF_TEXT_BYTES, ErrorCode::TextTooLong),
-            read_limited(&mut stderr, MAX_PDF_ERROR_BYTES, ErrorCode::ExtractionFailed),
+            read_limited(
+                &mut stderr,
+                MAX_PDF_ERROR_BYTES,
+                ErrorCode::ExtractionFailed
+            ),
         )?;
         let status = child.wait().await?;
         Ok::<_, CoreError>((status, text, error_text))
     })
-        .await
-        .map_err(|_| {
-            CoreError::public(
-                ErrorCode::ExtractionFailed,
-                "PDF 文字提取超过 60 秒安全上限",
-            )
-        })??;
+    .await
+    .map_err(|_| {
+        CoreError::public(
+            ErrorCode::ExtractionFailed,
+            "PDF 文字提取超过 60 秒安全上限",
+        )
+    })??;
 
     if !output.0.success() {
         let stderr = String::from_utf8_lossy(&output.2).to_ascii_lowercase();
@@ -98,10 +106,7 @@ async fn read_limited<R: AsyncRead + Unpin>(
             return Ok(bytes);
         }
         if bytes.len().saturating_add(count) > limit {
-            return Err(CoreError::public(
-                overflow_code,
-                "PDF 提取输出超过安全上限",
-            ));
+            return Err(CoreError::public(overflow_code, "PDF 提取输出超过安全上限"));
         }
         bytes.extend_from_slice(&buffer[..count]);
     }

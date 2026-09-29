@@ -19,18 +19,12 @@ pub fn to_markdown(report: &ReportV1) -> String {
         "- 提示词版本：{}\n",
         report.analysis.prompt_version
     ));
-    output.push_str(&format!(
-        "- 依据库版本：{}\n",
-        reference_label(report)
-    ));
+    output.push_str(&format!("- 依据库版本：{}\n", reference_label(report)));
     output.push_str(&format!(
         "- 分析器版本：{}\n",
         report.analysis.analyzer_version
     ));
-    output.push_str(&format!(
-        "- 模型配置：{}\n\n",
-        profile_label(report)
-    ));
+    output.push_str(&format!("- 模型配置：{}\n\n", profile_label(report)));
     if report.issues.is_empty() {
         output.push_str("未发现需要报告的问题。最终结果仍请作者自行审核。\n");
         return output;
