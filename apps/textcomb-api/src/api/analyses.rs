@@ -506,12 +506,14 @@ mod tests {
             username: format!("job-{user_id}"),
             role: "user".to_owned(),
         });
-        sqlx::query("INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')")
-            .bind(user_id)
-            .bind(&user.0.username)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')",
+        )
+        .bind(user_id)
+        .bind(&user.0.username)
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
             .bind(profile_id)
             .bind(user_id)
@@ -526,19 +528,30 @@ mod tests {
             .await
             .unwrap();
 
-        let input = || Json(CreateAnalysisRequest { document_id, model_profile_id: profile_id });
+        let input = || {
+            Json(CreateAnalysisRequest {
+                document_id,
+                model_profile_id: profile_id,
+            })
+        };
         let (first, second) = tokio::join!(
-            create(State(state.clone()), user.clone(), HeaderMap::new(), input()),
+            create(
+                State(state.clone()),
+                user.clone(),
+                HeaderMap::new(),
+                input()
+            ),
             create(State(state), user, HeaderMap::new(), input()),
         );
         assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1);
         let conflict = first.err().or_else(|| second.err()).unwrap();
         assert_eq!(conflict.0.code(), ErrorCode::Conflict);
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM analysis_jobs WHERE document_id = $1")
-            .bind(document_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM analysis_jobs WHERE document_id = $1")
+                .bind(document_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
 
         sqlx::query("DELETE FROM analysis_jobs WHERE user_id = $1")
