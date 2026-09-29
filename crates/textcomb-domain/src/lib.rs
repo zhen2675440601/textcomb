@@ -166,6 +166,8 @@ pub struct AnalysisSnapshot {
     pub candidate_model: String,
     pub verifier_model: String,
     pub prompt_version: String,
+    #[serde(default)]
+    pub reference_version: String,
     pub analyzer_version: String,
     pub reference_profile: bool,
 }

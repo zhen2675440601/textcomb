@@ -13,6 +13,7 @@ use crate::{
 };
 use ::time::OffsetDateTime;
 use futures::{StreamExt, stream};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use textcomb_domain::{
@@ -52,6 +53,10 @@ impl Worker {
 
     pub async fn run(self) -> CoreResult<()> {
         db::recover_expired_leases(&self.pool).await?;
+        let recovery_worker = self.clone();
+        tokio::spawn(async move {
+            recovery_worker.recovery_loop().await;
+        });
         let cleanup_worker = self.clone();
         tokio::spawn(async move {
             cleanup_worker.cleanup_loop().await;
@@ -234,6 +239,7 @@ impl Worker {
             configuration
         };
         let evidence = Arc::new(db::load_evidence(&self.pool).await?);
+        let reference_version = reference_version(&evidence);
         let storage_path = document_record
             .storage_path
             .as_deref()
@@ -449,6 +455,7 @@ impl Worker {
                 candidate_model: job_configuration.candidate_model.clone(),
                 verifier_model: job_configuration.verifier_model.clone(),
                 prompt_version: job_configuration.prompt_version.clone(),
+                reference_version,
                 analyzer_version: ANALYZER_VERSION.to_owned(),
                 reference_profile: job_configuration.is_reference,
             },
@@ -546,8 +553,22 @@ impl Worker {
         }
     }
 
+    async fn recovery_loop(&self) {
+        loop {
+            time::sleep(Duration::from_secs(30)).await;
+            match db::recover_expired_leases(&self.pool).await {
+                Ok(count) if count > 0 => {
+                    if let Err(error) = self.cleanup().await {
+                        error!(error = %error, "post-recovery cleanup failed");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => error!(error = %error, "lease recovery failed"),
+            }
+        }
+    }
+
     async fn cleanup(&self) -> CoreResult<()> {
-        db::recover_expired_leases(&self.pool).await?;
         crate::auth::cleanup_sessions(&self.pool).await?;
         for target in db::cleanup_expired(&self.pool).await? {
             let path = match &target {
@@ -567,6 +588,19 @@ impl Worker {
         }
         Ok(())
     }
+}
+
+fn reference_version(evidence: &HashMap<String, EvidenceRef>) -> String {
+    let mut entries: Vec<_> = evidence.values().collect();
+    entries.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut hasher = Sha256::new();
+    for entry in entries {
+        hasher.update(entry.source_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(entry.revision.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -734,4 +768,35 @@ async fn ensure_not_cancelled(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_fingerprint_is_stable_across_map_order() {
+        let first = EvidenceRef {
+            source_id: "a".to_owned(),
+            title: "A".to_owned(),
+            revision: "1".to_owned(),
+            source_url: "https://example.test/a".to_owned(),
+        };
+        let second = EvidenceRef {
+            source_id: "b".to_owned(),
+            title: "B".to_owned(),
+            revision: "2".to_owned(),
+            source_url: "https://example.test/b".to_owned(),
+        };
+        let left = HashMap::from([
+            (first.source_id.clone(), first.clone()),
+            (second.source_id.clone(), second.clone()),
+        ]);
+        let right = HashMap::from([
+            (second.source_id.clone(), second.clone()),
+            (first.source_id.clone(), first),
+        ]);
+        assert_eq!(reference_version(&left), reference_version(&right));
+        assert!(reference_version(&left).starts_with("sha256:"));
+    }
 }

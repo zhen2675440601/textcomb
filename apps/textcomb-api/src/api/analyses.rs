@@ -90,25 +90,6 @@ async fn create(
         ensure_same_idempotent_request(&existing, &input)?;
         return Ok((StatusCode::OK, Json(existing)));
     }
-    let document_exists: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM documents
-            WHERE id = $1 AND user_id = $2 AND storage_path IS NOT NULL
-              AND input_expires_at > now()
-        )
-        "#,
-    )
-    .bind(input.document_id)
-    .bind(user.id)
-    .fetch_one(&state.pool)
-    .await?;
-    if !document_exists {
-        return Err(ApiError(CoreError::public(
-            ErrorCode::NotFound,
-            "文档不存在、已删除或已完成过分析",
-        )));
-    }
     let profile_exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -136,6 +117,46 @@ async fn create(
     let job_id = Uuid::new_v4();
     let timeout_at = OffsetDateTime::now_utc()
         + time::Duration::seconds(state.config.job_timeout.as_secs() as i64);
+    // Lock the document before checking for another job. Concurrent create requests
+    // then observe the first committed job instead of sharing one input lifecycle.
+    let mut transaction = state.pool.begin().await?;
+    let document_exists: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM documents
+        WHERE id = $1 AND user_id = $2 AND storage_path IS NOT NULL
+          AND input_expires_at > now()
+        FOR UPDATE
+        "#,
+    )
+    .bind(input.document_id)
+    .bind(user.id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if document_exists.is_none() {
+        return Err(ApiError(CoreError::public(
+            ErrorCode::NotFound,
+            "文档不存在、已删除或已完成过分析",
+        )));
+    }
+    let already_analyzed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM analysis_jobs WHERE document_id = $1)",
+    )
+    .bind(input.document_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if already_analyzed {
+        drop(transaction);
+        if let Some(key) = idempotency_key.as_ref()
+            && let Some(existing) = fetch_by_idempotency(&state, user.id, key).await?
+        {
+            ensure_same_idempotent_request(&existing, &input)?;
+            return Ok((StatusCode::OK, Json(existing)));
+        }
+        return Err(ApiError(CoreError::public(
+            ErrorCode::Conflict,
+            "该文档已有分析任务；失败任务请使用重试接口",
+        )));
+    }
     let result = sqlx::query_as::<_, AnalysisResponse>(
         r#"
         INSERT INTO analysis_jobs(
@@ -156,11 +177,15 @@ async fn create(
     .bind(idempotency_key.as_deref())
     .bind(ANALYZER_VERSION)
     .bind(timeout_at)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await;
     match result {
-        Ok(job) => Ok((StatusCode::ACCEPTED, Json(job))),
+        Ok(job) => {
+            transaction.commit().await?;
+            Ok((StatusCode::ACCEPTED, Json(job)))
+        }
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+            drop(transaction);
             let key = idempotency_key.as_deref().ok_or_else(|| {
                 ApiError(CoreError::public(ErrorCode::Conflict, "分析任务已存在"))
             })?;

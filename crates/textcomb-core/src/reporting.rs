@@ -10,13 +10,26 @@ pub fn to_markdown(report: &ReportV1) -> String {
     output.push_str(&format!("- 正文字数：{}\n", report.document.char_count));
     output.push_str(&format!("- 正式问题：{}\n", report.summary.confirmed));
     output.push_str(&format!("- 疑似问题：{}\n", report.summary.suspected));
+    output.push_str(&format!("- 模型接口：{}\n", report.analysis.provider_kind));
     output.push_str(&format!(
         "- 模型：{} / {}\n",
         report.analysis.candidate_model, report.analysis.verifier_model
     ));
     output.push_str(&format!(
-        "- 提示词版本：{}\n\n",
+        "- 提示词版本：{}\n",
         report.analysis.prompt_version
+    ));
+    output.push_str(&format!(
+        "- 依据库版本：{}\n",
+        reference_label(report)
+    ));
+    output.push_str(&format!(
+        "- 分析器版本：{}\n",
+        report.analysis.analyzer_version
+    ));
+    output.push_str(&format!(
+        "- 模型配置：{}\n\n",
+        profile_label(report)
     ));
     if report.issues.is_empty() {
         output.push_str("未发现需要报告的问题。最终结果仍请作者自行审核。\n");
@@ -67,6 +80,16 @@ pub fn to_typst(report: &ReportV1) -> String {
         report.summary.confirmed,
         report.summary.suspected
     ));
+    output.push_str(&format!(
+        "- *模型接口：* {}\n- *模型：* {} / {}\n- *提示词版本：* {}\n- *依据库版本：* {}\n- *分析器版本：* {}\n- *模型配置：* {}\n\n",
+        typst_escape(&report.analysis.provider_kind),
+        typst_escape(&report.analysis.candidate_model),
+        typst_escape(&report.analysis.verifier_model),
+        typst_escape(&report.analysis.prompt_version),
+        typst_escape(reference_label(report)),
+        typst_escape(&report.analysis.analyzer_version),
+        profile_label(report),
+    ));
     for (index, issue) in report.issues.iter().enumerate() {
         output.push_str(&format!(
             "== {}. {} · {}\n\n",
@@ -98,6 +121,22 @@ pub fn to_typst(report: &ReportV1) -> String {
     output
         .push_str("#block(inset: 8pt, fill: luma(240))[文梳提供辅助建议，最终判断由作者完成。]\n");
     output
+}
+
+fn reference_label(report: &ReportV1) -> &str {
+    if report.analysis.reference_version.is_empty() {
+        "旧报告未记录"
+    } else {
+        &report.analysis.reference_version
+    }
+}
+
+fn profile_label(report: &ReportV1) -> &'static str {
+    if report.analysis.reference_profile {
+        "参考配置"
+    } else {
+        "未经验证"
+    }
 }
 
 pub async fn render_pdf(
@@ -213,6 +252,7 @@ mod tests {
                 candidate_model: "model".to_owned(),
                 verifier_model: "model".to_owned(),
                 prompt_version: "v1".to_owned(),
+                reference_version: "sha256:test".to_owned(),
                 analyzer_version: "v1".to_owned(),
                 reference_profile: false,
             },
@@ -221,6 +261,10 @@ mod tests {
         );
         let markdown = to_markdown(&report);
         assert!(markdown.contains("未发现"));
-        assert!(to_typst(&report).contains("文梳问题报告"));
+        let pdf_source = to_typst(&report);
+        for value in ["openai_compatible", "sha256:test", "未经验证", "v1"] {
+            assert!(markdown.contains(value));
+            assert!(pdf_source.contains(value));
+        }
     }
 }

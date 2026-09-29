@@ -143,6 +143,7 @@ export interface Report {
     candidate_model: string;
     verifier_model: string;
     prompt_version: string;
+    reference_version?: string;
     analyzer_version: string;
     reference_profile: boolean;
   };

@@ -513,7 +513,7 @@ async fn specification() -> Json<Value> {
                         "report_id": { "type": "string", "format": "uuid" },
                         "job_id": { "type": "string", "format": "uuid" },
                         "document": { "type": "object" },
-                        "analysis": { "type": "object" },
+                        "analysis": { "$ref": "#/components/schemas/AnalysisSnapshot" },
                         "summary": { "type": "object" },
                         "issues": {
                             "type": "array",
@@ -521,6 +521,22 @@ async fn specification() -> Json<Value> {
                         },
                         "complete": { "type": "boolean" },
                         "generated_at": { "type": "string", "format": "date-time" }
+                    }
+                },
+                "AnalysisSnapshot": {
+                    "type": "object",
+                    "required": [
+                        "provider_kind", "candidate_model", "verifier_model",
+                        "prompt_version", "analyzer_version", "reference_profile"
+                    ],
+                    "properties": {
+                        "provider_kind": { "type": "string" },
+                        "candidate_model": { "type": "string" },
+                        "verifier_model": { "type": "string" },
+                        "prompt_version": { "type": "string" },
+                        "reference_version": { "type": "string", "description": "活动依据 ID 和修订号的 SHA-256 指纹；旧报告可能缺失" },
+                        "analyzer_version": { "type": "string" },
+                        "reference_profile": { "type": "boolean" }
                     }
                 },
                 "ReportSource": {

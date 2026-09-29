@@ -1000,6 +1000,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AnalysisSnapshot: {
+            analyzer_version: string;
+            candidate_model: string;
+            prompt_version: string;
+            provider_kind: string;
+            reference_profile: boolean;
+            /** @description 活动依据 ID 和修订号的 SHA-256 指纹；旧报告可能缺失 */
+            reference_version?: string;
+            verifier_model: string;
+        };
         CreateAnalysis: {
             /** Format: uuid */
             document_id: string;
@@ -1090,7 +1100,7 @@ export interface components {
             text: string;
         };
         ReportV1: {
-            analysis: Record<string, never>;
+            analysis: components["schemas"]["AnalysisSnapshot"];
             complete: boolean;
             document: Record<string, never>;
             /** Format: date-time */
