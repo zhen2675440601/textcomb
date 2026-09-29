@@ -91,6 +91,8 @@ jobs:
           test "$count" -eq 3
       - name: Verify input retention against PostgreSQL
         run: cargo test --locked -p textcomb-core expired_failed_input_drops_body_but_active_report_keeps_its_source
+      - name: Verify concurrent analysis creation against PostgreSQL
+        run: cargo test --locked -p textcomb-api concurrent_requests_create_only_one_job_for_a_document
 
   container:
     runs-on: ubuntu-24.04

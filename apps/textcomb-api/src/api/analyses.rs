@@ -477,3 +477,80 @@ async fn fetch_by_idempotency(
     .fetch_optional(&state.pool)
     .await?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ApiMetrics;
+    use std::sync::Arc;
+    use textcomb_core::{AppConfig, auth::UserIdentity, storage::LocalStorage};
+
+    #[tokio::test]
+    async fn concurrent_requests_create_only_one_job_for_a_document() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let user_id = Uuid::new_v4();
+        let document_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4();
+        let storage_root = std::env::temp_dir().join(format!("textcomb-job-test-{document_id}"));
+        let state = AppState {
+            pool: pool.clone(),
+            config: Arc::new(AppConfig::from_env().unwrap()),
+            storage: LocalStorage::new(&storage_root).await.unwrap(),
+            metrics: ApiMetrics::new().unwrap(),
+        };
+        let user = AuthUser(UserIdentity {
+            id: user_id,
+            username: format!("job-{user_id}"),
+            role: "user".to_owned(),
+        });
+        sqlx::query("INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')")
+            .bind(user_id)
+            .bind(&user.0.username)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
+            .bind(profile_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO documents(id, user_id, original_name, media_type, document_format, size_bytes, storage_path, input_expires_at) VALUES($1,$2,'test.txt','text/plain','txt',4,$3,now() + interval '1 hour')")
+            .bind(document_id)
+            .bind(user_id)
+            .bind(storage_root.join("test.txt").to_string_lossy().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let input = || Json(CreateAnalysisRequest { document_id, model_profile_id: profile_id });
+        let (first, second) = tokio::join!(
+            create(State(state.clone()), user.clone(), HeaderMap::new(), input()),
+            create(State(state), user, HeaderMap::new(), input()),
+        );
+        assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1);
+        let conflict = first.err().or_else(|| second.err()).unwrap();
+        assert_eq!(conflict.0.code(), ErrorCode::Conflict);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM analysis_jobs WHERE document_id = $1")
+            .bind(document_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        sqlx::query("DELETE FROM analysis_jobs WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(storage_root).await.unwrap();
+    }
+}
