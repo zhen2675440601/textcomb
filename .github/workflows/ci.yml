@@ -155,9 +155,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
-      - run: |
-          cargo update -p rustls --precise 0.23.45
-          cargo update -p event-listener --precise 5.4.2
+      - run: cargo update -p chacha20@0.10.1 --precise 0.10.2
       - uses: actions/upload-artifact@v4
         with:
           name: refreshed-cargo-lock
