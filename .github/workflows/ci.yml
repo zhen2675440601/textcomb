@@ -146,3 +146,19 @@ jobs:
       - name: Stop smoke-test stack
         if: always()
         run: docker compose down -v --remove-orphans
+
+  temporary_lock_refresh:
+    if: github.head_ref == 'codex/fix-mvp-reliability'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - run: |
+          cargo update -p rustls --precise 0.23.45
+          cargo update -p event-listener --precise 5.4.2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refreshed-cargo-lock
+          path: Cargo.lock
