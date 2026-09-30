@@ -229,54 +229,17 @@ fn validate_pasted_text(text: &str) -> Result<usize, ApiError> {
     Ok(char_count)
 }
 
-async fn remove(
+pub(super) async fn remove(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(document_id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    let storage_path: Option<String> =
-        sqlx::query_scalar("SELECT storage_path FROM documents WHERE id = $1 AND user_id = $2")
-            .bind(document_id)
-            .bind(user.id)
-            .fetch_optional(&state.pool)
-            .await?
-            .flatten();
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents WHERE id = $1 AND user_id = $2)")
-            .bind(document_id)
-            .bind(user.id)
-            .fetch_one(&state.pool)
-            .await?;
-    if !exists {
-        return Err(ApiError(CoreError::public(
-            ErrorCode::NotFound,
-            "文档不存在",
-        )));
-    }
-    let pdf_paths: Vec<Option<String>> = sqlx::query_scalar(
-        r#"
-        SELECT reports.pdf_path
-        FROM reports
-        JOIN analysis_jobs ON analysis_jobs.id = reports.job_id
-        WHERE analysis_jobs.document_id = $1 AND reports.user_id = $2
-        "#,
+    super::deletion::remove(
+        &state,
+        user.id,
+        super::deletion::Target::Document(document_id),
     )
-    .bind(document_id)
-    .bind(user.id)
-    .fetch_all(&state.pool)
-    .await?;
-    if let Some(path) = storage_path.as_deref() {
-        state.storage.remove(FilePath::new(path)).await?;
-    }
-    for path in pdf_paths.iter().flatten() {
-        state.storage.remove(FilePath::new(path)).await?;
-    }
-    sqlx::query("DELETE FROM documents WHERE id = $1 AND user_id = $2")
-        .bind(document_id)
-        .bind(user.id)
-        .execute(&state.pool)
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
+    .await
 }
 
 fn safe_filename(value: &str) -> String {

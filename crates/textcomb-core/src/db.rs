@@ -28,6 +28,7 @@ pub struct ClaimedJob {
     pub prompt_version_id: Option<Uuid>,
     pub model_snapshot: Option<Value>,
     pub attempt_count: i32,
+    pub timeout_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -223,10 +224,24 @@ pub async fn ensure_default_prompt(pool: &PgPool) -> CoreResult<()> {
 pub async fn claim_job(pool: &PgPool, worker_id: &str) -> CoreResult<Option<ClaimedJob>> {
     let job = sqlx::query_as::<_, ClaimedJob>(
         r#"
-        WITH candidate AS (
+        WITH expired_candidates AS (
+            SELECT id FROM analysis_jobs
+            WHERE status = 'queued' AND timeout_at <= now()
+            FOR UPDATE SKIP LOCKED
+        ), expired AS (
+            UPDATE analysis_jobs AS job
+            SET status = 'failed', stage = 'failed', completed_at = now(),
+                worker_id = NULL, lease_until = NULL, heartbeat_at = NULL,
+                error_code = 'JOB_TIMEOUT',
+                error_message = '任务在排队期间超过截止时间，请重试'
+            FROM expired_candidates
+            WHERE job.id = expired_candidates.id
+              AND job.status = 'queued' AND job.timeout_at <= now()
+            RETURNING job.id
+        ), candidate AS (
             SELECT id
             FROM analysis_jobs
-            WHERE status = 'queued'
+            WHERE status = 'queued' AND timeout_at > now()
             ORDER BY created_at
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -244,7 +259,7 @@ pub async fn claim_job(pool: &PgPool, worker_id: &str) -> CoreResult<Option<Clai
         WHERE job.id = candidate.id
             RETURNING job.id, job.user_id, job.document_id, job.model_profile_id,
                   job.analysis_profile, job.prompt_version_id, job.model_snapshot,
-                  job.attempt_count
+                  job.attempt_count, job.timeout_at
         "#,
     )
     .bind(worker_id)
@@ -281,7 +296,7 @@ pub async fn recover_expired_leases(pool: &PgPool) -> CoreResult<u64> {
             completed_at = now(),
             error_code = 'JOB_TIMEOUT',
             error_message = '任务超过允许的最长处理时间'
-        WHERE status IN ('extracting', 'analyzing', 'verifying', 'merging', 'rendering')
+        WHERE status IN ('queued', 'extracting', 'analyzing', 'verifying', 'merging', 'rendering')
           AND timeout_at <= now()
         "#,
     )
@@ -524,6 +539,26 @@ pub async fn load_model_profile(
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| CoreError::public(ErrorCode::NotFound, "模型配置不存在或已停用"))
+}
+
+/// Runtime quota is live even for previously accepted jobs whose model/prompt
+/// snapshot is frozen. Disabling a profile prevents new jobs, not quota refresh.
+pub async fn load_model_concurrency(
+    pool: &PgPool,
+    profile_id: Uuid,
+    user_id: Uuid,
+) -> CoreResult<usize> {
+    let value: Option<i32> = sqlx::query_scalar(
+        "SELECT max_concurrency FROM model_profiles WHERE id = $1 AND (owner_id IS NULL OR owner_id = $2)",
+    ).bind(profile_id).bind(user_id).fetch_optional(pool).await?;
+    let value = value.ok_or_else(|| CoreError::public(ErrorCode::NotFound, "模型配置不存在"))?;
+    if !(1..=100).contains(&value) {
+        return Err(CoreError::public(
+            ErrorCode::ConfigurationInvalid,
+            "模型并发上限无效",
+        ));
+    }
+    Ok(value as usize)
 }
 
 pub async fn load_active_prompt(pool: &PgPool) -> CoreResult<PromptRecord> {

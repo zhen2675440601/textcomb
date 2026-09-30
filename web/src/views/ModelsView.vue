@@ -172,7 +172,7 @@ async function test(profile: ModelProfile) {
   success.value = "";
   try {
     await api.testModelProfile(profile.id);
-    success.value = `“${profile.name}”连接成功。`;
+    success.value = `“${profile.name}”的初检与复核模型均连接成功。`;
   } catch (cause) {
     error.value = cause instanceof ApiProblem ? cause.message : "模型连接测试失败";
   } finally {
@@ -319,7 +319,7 @@ onMounted(load);
             :disabled="testing === profile.id"
             @click="test(profile)"
           >
-            {{ testing === profile.id ? "测试中…" : "测试连接" }}
+            {{ testing === profile.id ? "正在测试两个模型…" : "测试连接" }}
           </button>
           <button class="text-button" type="button" @click="toggle(profile)">
             {{ profile.enabled ? "停用" : "启用" }}

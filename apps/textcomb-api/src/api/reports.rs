@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path as FilePath, str::FromStr};
+use std::str::FromStr;
 use textcomb_core::{CoreError, ErrorCode, db, reporting};
 use textcomb_domain::{
     FeedbackVerdict, Issue, IssueCategory, IssueLevel, MissedIssueFeedback, ReportV1,
@@ -436,63 +436,12 @@ async fn feedback(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete_report(
+pub(super) async fn delete_report(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(report_id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    let mut transaction = state.pool.begin().await?;
-    let report: Option<(Uuid, Uuid, Option<String>, Option<String>)> = sqlx::query_as(
-        r#"
-        SELECT reports.job_id, analysis_jobs.document_id, reports.pdf_path, documents.storage_path
-        FROM reports
-        JOIN analysis_jobs ON analysis_jobs.id = reports.job_id
-        JOIN documents ON documents.id = analysis_jobs.document_id
-        WHERE reports.id = $1 AND reports.user_id = $2
-        FOR UPDATE OF reports, analysis_jobs, documents
-        "#,
-    )
-    .bind(report_id)
-    .bind(user.id)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    let Some((job_id, document_id, pdf_path, input_path)) = report else {
-        return Err(ApiError(CoreError::public(
-            ErrorCode::NotFound,
-            "报告不存在",
-        )));
-    };
-    if let Some(path) = pdf_path.as_deref() {
-        state.storage.remove(FilePath::new(path)).await?;
-    }
-    if let Some(path) = input_path.as_deref() {
-        state.storage.remove(FilePath::new(path)).await?;
-    }
-    sqlx::query("DELETE FROM reports WHERE id = $1 AND user_id = $2")
-        .bind(report_id)
-        .bind(user.id)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(
-        "UPDATE analysis_jobs SET status = 'expired', stage = 'expired', report_id = NULL WHERE id = $1 AND user_id = $2",
-    )
-    .bind(job_id)
-    .bind(user.id)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE documents
-        SET extracted_text = NULL, storage_path = NULL, input_expires_at = NULL
-        WHERE id = $1 AND user_id = $2
-        "#,
-    )
-    .bind(document_id)
-    .bind(user.id)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
-    Ok(StatusCode::NO_CONTENT)
+    super::deletion::remove(&state, user.id, super::deletion::Target::Report(report_id)).await
 }
 
 fn attachment(
