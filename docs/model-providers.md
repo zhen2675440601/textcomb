@@ -23,7 +23,7 @@ TextComb 支持三种模型服务接口格式。选择的是**接口协议**，�
 ## 协议行为
 
 - **OpenAI Responses**：使用原生 Responses 请求体的 `instructions`、`input` 与 `text.format` JSON 模式，并固定发送 `store: false`，避免在支持该字段的服务中保留文章请求状态。模型需要支持 Responses API 与 JSON 模式。
-- **OpenAI Compatible**：使用 Chat Completions 的 `messages` 与 `response_format: {"type":"json_object"}`。适合官方兼容端点、API 网关及本地服务；兼容实现的实际能力由部署者负责确认。
+- **OpenAI Compatible**：使用 Chat Completions 的 `messages` 与 `response_format: {"type":"json_object"}`。响应必须包含正常结束标记 `finish_reason: "stop"`；截断、内容过滤、工具调用、拒绝或缺少结束标记会使文本块失败，即使正文恰好是合法 JSON 也不生成完整报告。适合官方兼容端点、API 网关及本地服务；兼容实现的实际能力由部署者负责确认。
 - **Anthropic**：使用原生 Messages API 的顶层 `system` 与 `messages`，并设置 `max_tokens: 8192`。为兼容更多 Messages API 模型，首版不强制依赖 Anthropic 的可选结构化输出特性；模型仍会收到严格 JSON 要求，服务器会继续验证结构、必要时进行一次 JSON 修复调用。
 
 上述三种协议共享相同的安全和可靠性边界：超时、429 和 5xx 最多重试三次；响应最多 1 MiB；结构无效时只进行一次“保持语义、不新增判断”的 JSON 修复调用；仍不合法则整个文本块失败。请求、错误和审计日志都不会记录 API 密钥、文章正文或完整提示词。

@@ -496,11 +496,24 @@ fn extract_provider_output(
 fn extract_chat_output(body: Value) -> CoreResult<(String, TokenUsage)> {
     let response: ChatResponse = serde_json::from_value(body)
         .map_err(|_| CoreError::public(ErrorCode::ModelOutputInvalid, "模型服务返回了无效响应"))?;
-    let content = response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| choice.message.content.into_text())
+    let choice = response.choices.into_iter().next().ok_or_else(|| {
+        CoreError::public(ErrorCode::ModelOutputInvalid, "模型没有返回结构化内容")
+    })?;
+    // Valid JSON alone cannot prove that analysis finished before the output
+    // limit or a provider filter. Require the protocol's normal stop marker.
+    if choice.finish_reason.as_deref() != Some("stop")
+        || choice
+            .message
+            .refusal
+            .as_deref()
+            .is_some_and(|refusal| !refusal.trim().is_empty())
+    {
+        return Err(CoreError::public(
+            ErrorCode::ModelOutputInvalid,
+            "模型响应未正常完成或拒绝了请求",
+        ));
+    }
+    let content = Some(choice.message.content.into_text())
         .filter(|content| !content.trim().is_empty())
         .ok_or_else(|| {
             CoreError::public(ErrorCode::ModelOutputInvalid, "模型没有返回结构化内容")
@@ -713,11 +726,15 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ChatResponseMessage {
     content: ChatContent,
+    #[serde(default)]
+    refusal: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -846,7 +863,7 @@ mod tests {
                     if model == "broken" {
                         (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": "unavailable model"})))
                     } else {
-                        (axum::http::StatusCode::OK, Json(json!({"choices": [{"message": {"content": "{\"ok\":true}"}}]})))
+                        (axum::http::StatusCode::OK, Json(json!({"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]})))
                     }
                 }
             )).with_state(models.clone());
@@ -1007,6 +1024,66 @@ mod tests {
         assert_eq!(content, "{\"ok\":true}");
         assert_eq!(usage.prompt_tokens, Some(7));
         assert_eq!(usage.completion_tokens, Some(4));
+    }
+
+    #[test]
+    fn compatible_completion_requires_normal_stop_even_with_valid_json() {
+        for reason in [
+            Some("length"),
+            Some("content_filter"),
+            Some("tool_calls"),
+            Some("function_call"),
+            Some("unexpected"),
+            Some(""),
+            None,
+        ] {
+            let body = json!({
+                "choices": [{
+                    "message": {"content": "{\"issues\":[]}"},
+                    "finish_reason": reason
+                }]
+            });
+            assert_eq!(
+                extract_chat_output(body).unwrap_err().code(),
+                ErrorCode::ModelOutputInvalid,
+                "abnormal completion: {reason:?}"
+            );
+        }
+        let missing = json!({"choices": [{"message": {"content": "{\"issues\":[]}"}}]});
+        assert_eq!(
+            extract_chat_output(missing).unwrap_err().code(),
+            ErrorCode::ModelOutputInvalid
+        );
+    }
+
+    #[test]
+    fn compatible_completion_rejects_refusal_and_preserves_text_parts_and_usage() {
+        let refused = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "{\"issues\":[]}", "refusal": "refused"}
+            }]
+        });
+        assert_eq!(
+            extract_chat_output(refused).unwrap_err().code(),
+            ErrorCode::ModelOutputInvalid
+        );
+        for content in [
+            json!("{\"issues\":[]}"),
+            json!([{"type": "text", "text": "{\"issues\":[]}"}]),
+        ] {
+            let (text, usage) = extract_chat_output(json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"content": content, "refusal": null}
+                }],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5}
+            }))
+            .unwrap();
+            assert_eq!(text, "{\"issues\":[]}");
+            assert_eq!(usage.prompt_tokens, Some(12));
+            assert_eq!(usage.completion_tokens, Some(5));
+        }
     }
 
     #[test]
