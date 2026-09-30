@@ -4,51 +4,52 @@ const port = Number(process.env.PORT ?? 4010);
 const delayMs = Math.max(0, Number(process.env.FAKE_MODEL_DELAY_MS ?? 0));
 const stats = { requests: 0, candidate: 0, verification: 0, connection_test: 0 };
 
+const fixtures = [
+  {
+    needle: "心情很繁重",
+    issue: {
+      category: "grammar",
+      grammar_subtype: "collocation",
+      quote: "心情很繁重",
+      context_before: "",
+      context_after: "",
+      reason: "“繁重”通常不与“心情”搭配。",
+      suggestion: "改为“心情很沉重”。",
+      confidence: 94,
+      evidence_source_ids: [],
+    },
+  },
+  {
+    needle: "通过这次学习，使",
+    issue: {
+      category: "grammar",
+      grammar_subtype: "missing_component",
+      quote: "通过这次学习，使",
+      context_before: "",
+      context_after: "",
+      reason: "介词结构与“使”同时使用导致句子缺少主语。",
+      suggestion: "删除“通过”或“使”。",
+      confidence: 96,
+      evidence_source_ids: [],
+    },
+  },
+  {
+    needle: "只要经常锻炼身体，才会",
+    issue: {
+      category: "grammar",
+      grammar_subtype: "conjunction",
+      quote: "只要经常锻炼身体，才会",
+      context_before: "",
+      context_after: "",
+      reason: "“只要”应与“就”搭配。",
+      suggestion: "将“才会”改为“就会”。",
+      confidence: 97,
+      evidence_source_ids: [],
+    },
+  },
+];
+
 function candidateIssues(text) {
-  const fixtures = [
-    {
-      needle: "心情很繁重",
-      issue: {
-        category: "grammar",
-        grammar_subtype: "collocation",
-        quote: "心情很繁重",
-        context_before: "",
-        context_after: "",
-        reason: "“繁重”通常不与“心情”搭配。",
-        suggestion: "改为“心情很沉重”。",
-        confidence: 94,
-        evidence_source_ids: [],
-      },
-    },
-    {
-      needle: "通过这次学习，使",
-      issue: {
-        category: "grammar",
-        grammar_subtype: "missing_component",
-        quote: "通过这次学习，使",
-        context_before: "",
-        context_after: "",
-        reason: "介词结构与“使”同时使用导致句子缺少主语。",
-        suggestion: "删除“通过”或“使”。",
-        confidence: 96,
-        evidence_source_ids: [],
-      },
-    },
-    {
-      needle: "只要经常锻炼身体，才会",
-      issue: {
-        category: "grammar",
-        grammar_subtype: "conjunction",
-        quote: "只要经常锻炼身体，才会",
-        context_before: "",
-        context_after: "",
-        reason: "“只要”应与“就”搭配。",
-        suggestion: "将“才会”改为“就会”。",
-        confidence: 97,
-        evidence_source_ids: [],
-      },
-    },
-  ];
   return fixtures
     .filter(({ needle }) => text.includes(needle))
     .map(({ issue }) => issue);
@@ -70,8 +71,9 @@ function responseFor(request) {
   }
   if (system.includes("复核员")) {
     stats.verification += 1;
-    const marker = "候选 JSON：\n";
-    const source = user.slice(user.indexOf(marker) + marker.length);
+    const marker = "待独立检查的位置 JSON：\n";
+    const markerIndex = user.indexOf(marker);
+    const source = markerIndex < 0 ? "[]" : user.slice(markerIndex + marker.length);
     let candidates = [];
     try {
       candidates = JSON.parse(source);
@@ -79,14 +81,19 @@ function responseFor(request) {
       candidates = [];
     }
     return {
-      verdicts: candidates.map((candidate, candidate_index) => ({
-        candidate_index,
-        verdict: candidate.category === "paragraph" ? "suspected" : "confirmed",
-        confidence: candidate.confidence ?? 90,
-        reason: candidate.reason ?? "复核通过。",
-        suggestion: candidate.suggestion ?? "",
-        evidence_source_ids: candidate.evidence_source_ids ?? [],
-      })),
+      verdicts: candidates.map((candidate, candidate_index) => {
+        const fixture = fixtures.find(({ issue }) => issue.quote === candidate.quote)?.issue;
+        return {
+          candidate_index,
+          category: fixture?.category ?? "paragraph",
+          grammar_subtype: fixture?.grammar_subtype ?? null,
+          verdict: fixture?.category === "paragraph" ? "suspected" : "confirmed",
+          confidence: fixture?.confidence ?? 90,
+          reason: fixture?.reason ?? "复核通过。",
+          suggestion: fixture?.suggestion ?? "请结合上下文修改。",
+          evidence_source_ids: [],
+        };
+      }),
     };
   }
   stats.candidate += 1;

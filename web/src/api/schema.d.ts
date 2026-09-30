@@ -178,7 +178,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"][];
+                    };
                 };
             };
         };
@@ -203,7 +205,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"];
+                    };
                 };
             };
         };
@@ -236,7 +240,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"];
+                    };
                 };
             };
         };
@@ -366,7 +372,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Analysis"];
+                    };
                 };
             };
         };
@@ -958,6 +966,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/reports/{id}/misses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["UuidId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        category: "typo" | "punctuation" | "grammar" | "paragraph";
+                        char_end: number;
+                        char_start: number;
+                        note: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description 漏检反馈已保存 */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MissedIssueFeedback"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/reports/{id}/misses/{miss_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["UuidId"];
+                    miss_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description 漏检反馈已删除 */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/reports/{id}/source": {
         parameters: {
             query?: never;
@@ -967,7 +1058,10 @@ export interface paths {
         };
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    start?: number;
+                    end?: number;
+                };
                 header?: never;
                 path: {
                     id: components["parameters"]["UuidId"];
@@ -1000,7 +1094,46 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Analysis: {
+            /** @enum {string} */
+            analysis_profile: "general" | "academic" | "financial";
+            /** Format: date-time */
+            completed_at: string | null;
+            completed_chunks: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            document_id: string;
+            error_code: string | null;
+            error_message: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            model_profile_id: string;
+            progress: number;
+            /** Format: uuid */
+            report_id: string | null;
+            stage: string;
+            /** Format: date-time */
+            started_at: string | null;
+            status: string;
+            total_chunks: number;
+        };
+        AnalysisSnapshot: {
+            /** @enum {string} */
+            analysis_profile: "general" | "academic" | "financial";
+            analyzer_version: string;
+            candidate_model: string;
+            prompt_version: string;
+            provider_kind: string;
+            reference_profile: boolean;
+            /** @description 活动依据 ID 和修订号的 SHA-256 指纹；旧报告可能缺失 */
+            reference_version?: string;
+            verifier_model: string;
+        };
         CreateAnalysis: {
+            /** @enum {string} */
+            analysis_profile?: "general" | "academic" | "financial";
             /** Format: uuid */
             document_id: string;
             /** Format: uuid */
@@ -1056,6 +1189,18 @@ export interface components {
             reason: string;
             suggestion: string;
         };
+        MissedIssueFeedback: {
+            /** @enum {string} */
+            category: "typo" | "punctuation" | "grammar" | "paragraph";
+            char_end: number;
+            char_start: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            note: string;
+            quote: string;
+        };
         ModelProfile: {
             /** Format: uri */
             base_url: string;
@@ -1084,13 +1229,15 @@ export interface components {
         };
         ReportSource: {
             char_count: number;
+            char_end: number;
+            char_start: number;
             /** @enum {string} */
             document_format: "txt" | "docx" | "pdf";
             original_name: string;
             text: string;
         };
         ReportV1: {
-            analysis: Record<string, never>;
+            analysis: components["schemas"]["AnalysisSnapshot"];
             complete: boolean;
             document: Record<string, never>;
             /** Format: date-time */
@@ -1098,6 +1245,7 @@ export interface components {
             issues: components["schemas"]["Issue"][];
             /** Format: uuid */
             job_id: string;
+            missed_issues?: components["schemas"]["MissedIssueFeedback"][];
             /** Format: uuid */
             report_id: string;
             /** @constant */

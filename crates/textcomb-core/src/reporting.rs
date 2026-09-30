@@ -1,6 +1,8 @@
 use crate::error::{CoreError, CoreResult, ErrorCode};
 use std::path::{Path, PathBuf};
-use textcomb_domain::{Issue, IssueLevel, ReportV1, SourceLocation};
+use textcomb_domain::{
+    AnalysisProfile, FeedbackVerdict, Issue, IssueLevel, ReportV1, SourceLocation,
+};
 use tokio::{fs, process::Command, time};
 
 pub fn to_markdown(report: &ReportV1) -> String {
@@ -8,19 +10,29 @@ pub fn to_markdown(report: &ReportV1) -> String {
     output.push_str("# 文梳问题报告\n\n");
     output.push_str(&format!("- 文件：{}\n", report.document.original_name));
     output.push_str(&format!("- 正文字数：{}\n", report.document.char_count));
+    output.push_str(&format!(
+        "- 分析场景：{}\n",
+        analysis_profile_label(report.analysis.analysis_profile)
+    ));
     output.push_str(&format!("- 正式问题：{}\n", report.summary.confirmed));
     output.push_str(&format!("- 疑似问题：{}\n", report.summary.suspected));
+    output.push_str(&format!("- 模型接口：{}\n", report.analysis.provider_kind));
     output.push_str(&format!(
         "- 模型：{} / {}\n",
         report.analysis.candidate_model, report.analysis.verifier_model
     ));
     output.push_str(&format!(
-        "- 提示词版本：{}\n\n",
+        "- 提示词版本：{}\n",
         report.analysis.prompt_version
     ));
+    output.push_str(&format!("- 依据库版本：{}\n", reference_label(report)));
+    output.push_str(&format!(
+        "- 分析器版本：{}\n",
+        report.analysis.analyzer_version
+    ));
+    output.push_str(&format!("- 模型配置：{}\n\n", profile_label(report)));
     if report.issues.is_empty() {
-        output.push_str("未发现需要报告的问题。最终结果仍请作者自行审核。\n");
-        return output;
+        output.push_str("未发现需要报告的问题。最终结果仍请作者自行审核。\n\n");
     }
     for (index, issue) in report.issues.iter().enumerate() {
         output.push_str(&format!(
@@ -34,14 +46,31 @@ pub fn to_markdown(report: &ReportV1) -> String {
         output.push_str(&format!("- 原因：{}\n", issue.reason));
         output.push_str(&format!("- 建议：{}\n", issue.suggestion));
         output.push_str(&format!("- 置信度：{}%\n", issue.confidence));
+        if let Some(feedback) = issue.feedback {
+            output.push_str(&format!("- 作者审核：{}\n", feedback_label(feedback)));
+        }
         if !issue.evidence_refs.is_empty() {
-            output.push_str("- 依据：\n");
+            output.push_str("- 参考资料（具体条款未核对）：\n");
             for evidence in &issue.evidence_refs {
                 output.push_str(&format!(
                     "  - [{} {}]({})\n",
                     evidence.title, evidence.revision, evidence.source_url
                 ));
             }
+        }
+        output.push('\n');
+    }
+    if !report.missed_issues.is_empty() {
+        output.push_str("## 作者标记的漏检\n\n");
+        for miss in &report.missed_issues {
+            output.push_str(&format!(
+                "- {}（字符 {}–{}）：{}；说明：{}\n",
+                miss.category.as_str(),
+                miss.char_start,
+                miss.char_end,
+                miss.quote,
+                miss.note
+            ));
         }
         output.push('\n');
     }
@@ -61,11 +90,22 @@ pub fn to_typst(report: &ReportV1) -> String {
 "#,
     );
     output.push_str(&format!(
-        "#table(columns: (80pt, 1fr), [文件], [{}], [正文字数], [{}], [正式问题], [{}], [疑似问题], [{}])\n\n",
+        "#table(columns: (80pt, 1fr), [文件], [{}], [正文字数], [{}], [分析场景], [{}], [正式问题], [{}], [疑似问题], [{}])\n\n",
         typst_escape(&report.document.original_name),
         report.document.char_count,
+        typst_escape(analysis_profile_label(report.analysis.analysis_profile)),
         report.summary.confirmed,
         report.summary.suspected
+    ));
+    output.push_str(&format!(
+        "- *模型接口：* {}\n- *模型：* {} / {}\n- *提示词版本：* {}\n- *依据库版本：* {}\n- *分析器版本：* {}\n- *模型配置：* {}\n\n",
+        typst_escape(&report.analysis.provider_kind),
+        typst_escape(&report.analysis.candidate_model),
+        typst_escape(&report.analysis.verifier_model),
+        typst_escape(&report.analysis.prompt_version),
+        typst_escape(reference_label(report)),
+        typst_escape(&report.analysis.analyzer_version),
+        profile_label(report),
     ));
     for (index, issue) in report.issues.iter().enumerate() {
         output.push_str(&format!(
@@ -82,8 +122,11 @@ pub fn to_typst(report: &ReportV1) -> String {
             typst_escape(&issue.suggestion),
             issue.confidence
         ));
+        if let Some(feedback) = issue.feedback {
+            output.push_str(&format!("- *作者审核：* {}\n", feedback_label(feedback)));
+        }
         if !issue.evidence_refs.is_empty() {
-            output.push_str("- *依据：*\n");
+            output.push_str("- *参考资料（具体条款未核对）：*\n");
             for evidence in &issue.evidence_refs {
                 output.push_str(&format!(
                     "  - #link(\"{}\")[{} {}]\n",
@@ -95,9 +138,39 @@ pub fn to_typst(report: &ReportV1) -> String {
         }
         output.push('\n');
     }
+    if !report.missed_issues.is_empty() {
+        output.push_str("== 作者标记的漏检\n\n");
+        for miss in &report.missed_issues {
+            output.push_str(&format!(
+                "- {}（字符 {}–{}）：#quote[{}]；说明：{}\n",
+                typst_escape(miss.category.as_str()),
+                miss.char_start,
+                miss.char_end,
+                typst_escape(&miss.quote),
+                typst_escape(&miss.note)
+            ));
+        }
+        output.push('\n');
+    }
     output
         .push_str("#block(inset: 8pt, fill: luma(240))[文梳提供辅助建议，最终判断由作者完成。]\n");
     output
+}
+
+fn reference_label(report: &ReportV1) -> &str {
+    if report.analysis.reference_version.is_empty() {
+        "旧报告未记录"
+    } else {
+        &report.analysis.reference_version
+    }
+}
+
+fn profile_label(report: &ReportV1) -> &'static str {
+    if report.analysis.reference_profile {
+        "参考配置"
+    } else {
+        "未经验证"
+    }
 }
 
 pub async fn render_pdf(
@@ -147,10 +220,26 @@ fn category_label(issue: &Issue) -> &'static str {
     }
 }
 
+fn analysis_profile_label(profile: AnalysisProfile) -> &'static str {
+    match profile {
+        AnalysisProfile::General => "通用文章",
+        AnalysisProfile::Academic => "学术论文",
+        AnalysisProfile::Financial => "财报/商业报告",
+    }
+}
+
 fn level_label(level: IssueLevel) -> &'static str {
     match level {
         IssueLevel::Confirmed => "正式问题",
         IssueLevel::Suspected => "疑似问题",
+    }
+}
+
+fn feedback_label(feedback: FeedbackVerdict) -> &'static str {
+    match feedback {
+        FeedbackVerdict::Correct => "正确",
+        FeedbackVerdict::Incorrect => "错误",
+        FeedbackVerdict::Disputed => "有争议",
     }
 }
 
@@ -195,7 +284,9 @@ fn typst_escape(value: &str) -> String {
 mod tests {
     use super::*;
     use ::time::OffsetDateTime;
-    use textcomb_domain::{AnalysisSnapshot, DocumentFormat, DocumentMetadata, ReportV1};
+    use textcomb_domain::{
+        AnalysisProfile, AnalysisSnapshot, DocumentFormat, DocumentMetadata, ReportV1,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -209,10 +300,12 @@ mod tests {
                 char_count: 10,
             },
             AnalysisSnapshot {
+                analysis_profile: AnalysisProfile::General,
                 provider_kind: "openai_compatible".to_owned(),
                 candidate_model: "model".to_owned(),
                 verifier_model: "model".to_owned(),
                 prompt_version: "v1".to_owned(),
+                reference_version: "sha256:test".to_owned(),
                 analyzer_version: "v1".to_owned(),
                 reference_profile: false,
             },
@@ -221,6 +314,10 @@ mod tests {
         );
         let markdown = to_markdown(&report);
         assert!(markdown.contains("未发现"));
-        assert!(to_typst(&report).contains("文梳问题报告"));
+        let pdf_source = to_typst(&report);
+        for value in ["openai_compatible", "sha256:test", "未经验证", "v1"] {
+            assert!(markdown.contains(value));
+            assert!(pdf_source.contains(value));
+        }
     }
 }

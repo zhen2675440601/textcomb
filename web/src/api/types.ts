@@ -41,10 +41,13 @@ export type AnalysisStatus =
   | "cancelled"
   | "expired";
 
+export type AnalysisProfile = "general" | "academic" | "financial";
+
 export interface Analysis {
   id: string;
   document_id: string;
   model_profile_id: string;
+  analysis_profile: AnalysisProfile;
   status: AnalysisStatus;
   stage: string;
   progress: number;
@@ -93,6 +96,8 @@ export interface ReportSource {
   original_name: string;
   document_format: DocumentFormat;
   char_count: number;
+  char_start: number;
+  char_end: number;
   text: string;
 }
 
@@ -129,6 +134,16 @@ export interface Issue {
   feedback?: FeedbackVerdict;
 }
 
+export interface MissedIssueFeedback {
+  id: string;
+  category: IssueCategory;
+  char_start: number;
+  char_end: number;
+  quote: string;
+  note: string;
+  created_at: string;
+}
+
 export interface Report {
   schema: "textcomb.report.v1";
   report_id: string;
@@ -139,10 +154,12 @@ export interface Report {
     char_count: number;
   };
   analysis: {
+    analysis_profile: AnalysisProfile;
     provider_kind: string;
     candidate_model: string;
     verifier_model: string;
     prompt_version: string;
+    reference_version?: string;
     analyzer_version: string;
     reference_profile: boolean;
   };
@@ -156,6 +173,7 @@ export interface Report {
     paragraph: number;
   };
   issues: Issue[];
+  missed_issues?: MissedIssueFeedback[];
   complete: boolean;
   generated_at: string;
 }

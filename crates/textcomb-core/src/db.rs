@@ -21,6 +21,7 @@ pub struct ClaimedJob {
     pub user_id: Uuid,
     pub document_id: Uuid,
     pub model_profile_id: Uuid,
+    pub analysis_profile: String,
     pub prompt_version_id: Option<Uuid>,
     pub model_snapshot: Option<Value>,
     pub attempt_count: i32,
@@ -66,6 +67,10 @@ pub struct PromptRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobConfiguration {
+    #[serde(default)]
+    pub analysis_profile: textcomb_domain::AnalysisProfile,
+    #[serde(default)]
+    pub scenario_guidance_version: String,
     pub provider_kind: String,
     pub base_url: String,
     pub api_key_ciphertext: Vec<u8>,
@@ -81,8 +86,14 @@ pub struct JobConfiguration {
 }
 
 impl JobConfiguration {
-    pub fn from_records(profile: &ModelProfileRecord, prompt: &PromptRecord) -> Self {
-        Self {
+    pub fn from_records(
+        profile: &ModelProfileRecord,
+        prompt: &PromptRecord,
+        analysis_profile: textcomb_domain::AnalysisProfile,
+    ) -> Self {
+        let mut configuration = Self {
+            analysis_profile,
+            scenario_guidance_version: String::new(),
             provider_kind: profile.provider_kind.clone(),
             base_url: profile.base_url.clone(),
             api_key_ciphertext: profile.api_key_ciphertext.clone(),
@@ -95,7 +106,29 @@ impl JobConfiguration {
             verifier_system_prompt: prompt.verifier_template.clone(),
             confirmed_threshold: prompt.confirmed_threshold,
             suspected_threshold: prompt.suspected_threshold,
+        };
+        configuration.freeze_profile_guidance();
+        configuration
+    }
+
+    /// Persist the exact scenario-specific instructions with the job so a
+    /// queued or retried task is not affected by later application deploys.
+    /// Returns whether an older snapshot was upgraded in memory.
+    pub fn freeze_profile_guidance(&mut self) -> bool {
+        // Any non-empty value means this snapshot already contains the exact
+        // guidance used when the job was created. A future guidance release
+        // must not rewrite queued or retried jobs from an older version.
+        if !self.scenario_guidance_version.is_empty() {
+            return false;
         }
+        self.candidate_system_prompt =
+            prompts::append_profile_guidance(&self.candidate_system_prompt, self.analysis_profile);
+        self.verifier_system_prompt =
+            prompts::append_profile_guidance(&self.verifier_system_prompt, self.analysis_profile);
+        self.prompt_version =
+            prompts::scoped_prompt_version(&self.prompt_version, self.analysis_profile);
+        self.scenario_guidance_version = prompts::SCENARIO_GUIDANCE_VERSION.to_owned();
+        true
     }
 }
 
@@ -207,7 +240,8 @@ pub async fn claim_job(pool: &PgPool, worker_id: &str) -> CoreResult<Option<Clai
         FROM candidate
         WHERE job.id = candidate.id
             RETURNING job.id, job.user_id, job.document_id, job.model_profile_id,
-                  job.prompt_version_id, job.model_snapshot, job.attempt_count
+                  job.analysis_profile, job.prompt_version_id, job.model_snapshot,
+                  job.attempt_count
         "#,
     )
     .bind(worker_id)
@@ -279,6 +313,19 @@ pub async fn recover_expired_leases(pool: &PgPool) -> CoreResult<u64> {
     .execute(pool)
     .await?
     .rows_affected();
+    sqlx::query(
+        r#"
+        UPDATE analysis_chunks AS chunk
+        SET content = NULL, candidate_output = NULL, verifier_output = NULL,
+            updated_at = now()
+        FROM analysis_jobs AS job
+        WHERE chunk.job_id = job.id AND job.status = 'cancelled'
+          AND (chunk.content IS NOT NULL OR chunk.candidate_output IS NOT NULL
+               OR chunk.verifier_output IS NOT NULL)
+        "#,
+    )
+    .execute(pool)
+    .await?;
     Ok(recovered)
 }
 
@@ -564,7 +611,7 @@ pub async fn set_job_configuration(
     pool: &PgPool,
     job_id: Uuid,
     worker_id: &str,
-    prompt_version_id: Uuid,
+    prompt_version_id: Option<Uuid>,
     model_snapshot: &Value,
 ) -> CoreResult<()> {
     let result = sqlx::query(
@@ -732,26 +779,34 @@ pub async fn mark_chunk_verifying(
     worker_id: &str,
     chunk_index: usize,
 ) -> CoreResult<()> {
-    let mut transaction = pool.begin().await?;
-    let chunk_update = sqlx::query(
-        "UPDATE analysis_chunks SET status = 'verifying', updated_at = now() WHERE job_id = $1 AND chunk_index = $2 AND EXISTS (SELECT 1 FROM analysis_jobs WHERE id = $1 AND worker_id = $3 AND status IN ('extracting','analyzing','verifying','merging','rendering'))",
+    let result = sqlx::query(
+        r#"
+        WITH updated_chunk AS (
+            UPDATE analysis_chunks
+            SET status = 'verifying', updated_at = now()
+            WHERE job_id = $1 AND chunk_index = $2
+              AND EXISTS (
+                  SELECT 1 FROM analysis_jobs
+                  WHERE id = $1 AND worker_id = $3
+                    AND status IN ('extracting','analyzing','verifying','merging','rendering')
+              )
+            RETURNING job_id
+        )
+        UPDATE analysis_jobs
+        SET status = 'verifying', stage = 'verifying'
+        WHERE id = $1 AND worker_id = $3
+          AND status IN ('analyzing','verifying')
+          AND EXISTS (SELECT 1 FROM updated_chunk)
+        "#,
     )
     .bind(job_id)
     .bind(chunk_index as i32)
     .bind(worker_id)
-    .execute(&mut *transaction)
+    .execute(pool)
     .await?;
-    if chunk_update.rows_affected() != 1 {
+    if result.rows_affected() != 1 {
         return Err(CoreError::public(ErrorCode::Conflict, "任务租约已失效"));
     }
-    sqlx::query(
-        "UPDATE analysis_jobs SET status = 'verifying', stage = 'verifying' WHERE id = $1 AND worker_id = $2 AND status IN ('analyzing','verifying')",
-    )
-    .bind(job_id)
-    .bind(worker_id)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
     Ok(())
 }
 
@@ -991,7 +1046,16 @@ async fn insert_issue(
 
 pub async fn confirm_document_file_removed(pool: &PgPool, path: &Path) -> CoreResult<()> {
     sqlx::query(
-        "UPDATE documents SET storage_path = NULL, input_expires_at = NULL WHERE storage_path = $1",
+        r#"
+        UPDATE documents AS document
+        SET storage_path = NULL, input_expires_at = NULL,
+            extracted_text = CASE WHEN EXISTS (
+                SELECT 1 FROM analysis_jobs AS job
+                JOIN reports AS report ON report.job_id = job.id
+                WHERE job.document_id = document.id AND report.expires_at > now()
+            ) THEN document.extracted_text ELSE NULL END
+        WHERE document.storage_path = $1
+        "#,
     )
     .bind(path.to_string_lossy().as_ref())
     .execute(pool)
@@ -1143,12 +1207,35 @@ pub async fn cleanup_expired(pool: &PgPool) -> CoreResult<Vec<CleanupTarget>> {
     )
     .execute(pool)
     .await?;
+    // Failed inputs have no report that justifies retaining the extracted body.
+    // A completed report still needs this body for source-position navigation.
     sqlx::query(
         r#"
-        UPDATE documents SET input_expires_at = NULL
-        WHERE storage_path IS NULL
-          AND input_expires_at IS NOT NULL
-          AND input_expires_at < now()
+        UPDATE documents AS document
+        SET extracted_text = NULL
+        WHERE document.input_expires_at IS NOT NULL
+          AND document.input_expires_at < now()
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_jobs AS job
+              JOIN reports AS report ON report.job_id = job.id
+              WHERE job.document_id = document.id AND report.expires_at > now()
+          )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE documents AS document
+        SET input_expires_at = NULL,
+            extracted_text = CASE WHEN EXISTS (
+                SELECT 1 FROM analysis_jobs AS job
+                JOIN reports AS report ON report.job_id = job.id
+                WHERE job.document_id = document.id AND report.expires_at > now()
+            ) THEN document.extracted_text ELSE NULL END
+        WHERE document.storage_path IS NULL
+          AND document.input_expires_at IS NOT NULL
+          AND document.input_expires_at < now()
         "#,
     )
     .execute(pool)
@@ -1202,5 +1289,159 @@ pub async fn confirm_cleanup_target(pool: &PgPool, target: &CleanupTarget) -> Co
             transaction.commit().await?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use textcomb_domain::AnalysisProfile;
+
+    #[test]
+    fn profile_guidance_is_frozen_once_in_job_snapshot() {
+        let mut configuration = JobConfiguration {
+            analysis_profile: AnalysisProfile::Academic,
+            scenario_guidance_version: String::new(),
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            api_key_ciphertext: vec![1],
+            candidate_model: "candidate".to_owned(),
+            verifier_model: "verifier".to_owned(),
+            max_concurrency: 1,
+            is_reference: false,
+            prompt_version: "zh-cn-proofread-v3".to_owned(),
+            candidate_system_prompt: "候选基础提示".to_owned(),
+            verifier_system_prompt: "复核基础提示".to_owned(),
+            confirmed_threshold: 80,
+            suspected_threshold: 50,
+        };
+
+        assert!(configuration.freeze_profile_guidance());
+        assert_eq!(
+            configuration.prompt_version,
+            "zh-cn-proofread-v3+scenario-v1-academic"
+        );
+        assert!(
+            configuration
+                .candidate_system_prompt
+                .contains("当前场景：学术论文")
+        );
+        assert!(
+            configuration
+                .verifier_system_prompt
+                .contains("当前场景：学术论文")
+        );
+        let candidate_prompt = configuration.candidate_system_prompt.clone();
+        assert!(!configuration.freeze_profile_guidance());
+        assert_eq!(configuration.candidate_system_prompt, candidate_prompt);
+
+        configuration.scenario_guidance_version = "scenario-v0".to_owned();
+        configuration.candidate_system_prompt = "已冻结的旧版提示".to_owned();
+        assert!(!configuration.freeze_profile_guidance());
+        assert_eq!(configuration.candidate_system_prompt, "已冻结的旧版提示");
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn expired_failed_input_drops_body_but_active_report_keeps_its_source() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let user_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4();
+        let failed_document = Uuid::new_v4();
+        let report_document = Uuid::new_v4();
+        let failed_job = Uuid::new_v4();
+        let completed_job = Uuid::new_v4();
+        let report_id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')",
+        )
+        .bind(user_id)
+        .bind(format!("cleanup-{user_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
+            .bind(profile_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for document_id in [failed_document, report_document] {
+            sqlx::query("INSERT INTO documents(id, user_id, original_name, media_type, document_format, size_bytes, storage_path, extracted_text, input_expires_at) VALUES($1,$2,'test.txt','text/plain','txt',4,$3,'正文',now() - interval '1 minute')")
+                .bind(document_id)
+                .bind(user_id)
+                .bind(format!("/tmp/{document_id}.txt"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (job_id, document_id, status) in [
+            (failed_job, failed_document, "failed"),
+            (completed_job, report_document, "completed"),
+        ] {
+            sqlx::query("INSERT INTO analysis_jobs(id, user_id, document_id, model_profile_id, status, analyzer_version, timeout_at) VALUES($1,$2,$3,$4,$5,'test',now() + interval '1 hour')")
+                .bind(job_id)
+                .bind(user_id)
+                .bind(document_id)
+                .bind(profile_id)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO reports(id, job_id, user_id, document_name, content_json, markdown, expires_at) VALUES($1,$2,$3,'test.txt','{}','',now() + interval '1 day')")
+            .bind(report_id)
+            .bind(completed_job)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let targets = cleanup_expired(&pool).await.unwrap();
+        for target in targets {
+            if let CleanupTarget::Document(path) = &target
+                && (path
+                    .to_string_lossy()
+                    .contains(&failed_document.to_string())
+                    || path
+                        .to_string_lossy()
+                        .contains(&report_document.to_string()))
+            {
+                confirm_cleanup_target(&pool, &target).await.unwrap();
+            }
+        }
+        let failed_body: Option<String> =
+            sqlx::query_scalar("SELECT extracted_text FROM documents WHERE id = $1")
+                .bind(failed_document)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let report_body: Option<String> =
+            sqlx::query_scalar("SELECT extracted_text FROM documents WHERE id = $1")
+                .bind(report_document)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(failed_body.is_none());
+        assert_eq!(report_body.as_deref(), Some("正文"));
+
+        sqlx::query("DELETE FROM analysis_jobs WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

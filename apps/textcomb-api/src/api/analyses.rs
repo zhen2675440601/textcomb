@@ -17,7 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, time::Duration};
 use textcomb_core::{CoreError, ErrorCode, db};
-use textcomb_domain::ANALYZER_VERSION;
+use textcomb_domain::{ANALYZER_VERSION, AnalysisProfile};
 use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
@@ -36,6 +36,7 @@ pub struct AnalysisResponse {
     pub id: Uuid,
     pub document_id: Uuid,
     pub model_profile_id: Uuid,
+    pub analysis_profile: String,
     pub status: String,
     pub stage: String,
     pub progress: i16,
@@ -58,7 +59,7 @@ async fn list(
 ) -> ApiResult<Json<Vec<AnalysisResponse>>> {
     let jobs = sqlx::query_as::<_, AnalysisResponse>(
         r#"
-        SELECT id, document_id, model_profile_id, status, stage, progress,
+        SELECT id, document_id, model_profile_id, analysis_profile, status, stage, progress,
                total_chunks, completed_chunks, error_code, error_message,
                report_id, created_at, started_at, completed_at
         FROM analysis_jobs WHERE user_id = $1
@@ -75,6 +76,8 @@ async fn list(
 struct CreateAnalysisRequest {
     document_id: Uuid,
     model_profile_id: Uuid,
+    #[serde(default)]
+    analysis_profile: Option<AnalysisProfile>,
 }
 
 async fn create(
@@ -89,25 +92,6 @@ async fn create(
     {
         ensure_same_idempotent_request(&existing, &input)?;
         return Ok((StatusCode::OK, Json(existing)));
-    }
-    let document_exists: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM documents
-            WHERE id = $1 AND user_id = $2 AND storage_path IS NOT NULL
-              AND input_expires_at > now()
-        )
-        "#,
-    )
-    .bind(input.document_id)
-    .bind(user.id)
-    .fetch_one(&state.pool)
-    .await?;
-    if !document_exists {
-        return Err(ApiError(CoreError::public(
-            ErrorCode::NotFound,
-            "文档不存在、已删除或已完成过分析",
-        )));
     }
     let profile_exists: bool = sqlx::query_scalar(
         r#"
@@ -127,22 +111,63 @@ async fn create(
             "模型配置不存在或已停用",
         )));
     }
+    let analysis_profile = input.analysis_profile.unwrap_or_default();
     let model_record = db::load_model_profile(&state.pool, input.model_profile_id, user.id).await?;
     let prompt_record = db::load_active_prompt(&state.pool).await?;
     let model_snapshot = serde_json::to_value(db::JobConfiguration::from_records(
         &model_record,
         &prompt_record,
+        analysis_profile,
     ))?;
     let job_id = Uuid::new_v4();
     let timeout_at = OffsetDateTime::now_utc()
         + time::Duration::seconds(state.config.job_timeout.as_secs() as i64);
+    // Lock the document before checking for another job. Concurrent create requests
+    // then observe the first committed job instead of sharing one input lifecycle.
+    let mut transaction = state.pool.begin().await?;
+    let document_exists: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM documents
+        WHERE id = $1 AND user_id = $2 AND storage_path IS NOT NULL
+          AND input_expires_at > now()
+        FOR UPDATE
+        "#,
+    )
+    .bind(input.document_id)
+    .bind(user.id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if document_exists.is_none() {
+        return Err(ApiError(CoreError::public(
+            ErrorCode::NotFound,
+            "文档不存在、已删除或已完成过分析",
+        )));
+    }
+    let already_analyzed: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM analysis_jobs WHERE document_id = $1)")
+            .bind(input.document_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if already_analyzed {
+        drop(transaction);
+        if let Some(key) = idempotency_key.as_ref()
+            && let Some(existing) = fetch_by_idempotency(&state, user.id, key).await?
+        {
+            ensure_same_idempotent_request(&existing, &input)?;
+            return Ok((StatusCode::OK, Json(existing)));
+        }
+        return Err(ApiError(CoreError::public(
+            ErrorCode::Conflict,
+            "该文档已有分析任务；失败任务请使用重试接口",
+        )));
+    }
     let result = sqlx::query_as::<_, AnalysisResponse>(
         r#"
         INSERT INTO analysis_jobs(
-            id, user_id, document_id, model_profile_id, status,
+            id, user_id, document_id, model_profile_id, analysis_profile, status,
             prompt_version_id, model_snapshot, idempotency_key, analyzer_version, timeout_at
-        ) VALUES($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9)
-        RETURNING id, document_id, model_profile_id, status, stage, progress,
+        ) VALUES($1,$2,$3,$4,$5,'queued',$6,$7,$8,$9,$10)
+        RETURNING id, document_id, model_profile_id, analysis_profile, status, stage, progress,
                   total_chunks, completed_chunks, error_code, error_message,
                   report_id, created_at, started_at, completed_at
         "#,
@@ -151,16 +176,21 @@ async fn create(
     .bind(user.id)
     .bind(input.document_id)
     .bind(input.model_profile_id)
+    .bind(analysis_profile.as_str())
     .bind(prompt_record.id)
     .bind(model_snapshot)
     .bind(idempotency_key.as_deref())
     .bind(ANALYZER_VERSION)
     .bind(timeout_at)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await;
     match result {
-        Ok(job) => Ok((StatusCode::ACCEPTED, Json(job))),
+        Ok(job) => {
+            transaction.commit().await?;
+            Ok((StatusCode::ACCEPTED, Json(job)))
+        }
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+            drop(transaction);
             let key = idempotency_key.as_deref().ok_or_else(|| {
                 ApiError(CoreError::public(ErrorCode::Conflict, "分析任务已存在"))
             })?;
@@ -182,6 +212,7 @@ fn ensure_same_idempotent_request(
 ) -> ApiResult<()> {
     if existing.document_id != input.document_id
         || existing.model_profile_id != input.model_profile_id
+        || existing.analysis_profile != input.analysis_profile.unwrap_or_default().as_str()
     {
         return Err(ApiError(CoreError::public(
             ErrorCode::Conflict,
@@ -385,7 +416,7 @@ async fn events(
         loop {
             let job = sqlx::query_as::<_, AnalysisResponse>(
                 r#"
-                SELECT id, document_id, model_profile_id, status, stage, progress,
+                SELECT id, document_id, model_profile_id, analysis_profile, status, stage, progress,
                        total_chunks, completed_chunks, error_code, error_message,
                        report_id, created_at, started_at, completed_at
                 FROM analysis_jobs WHERE id = $1 AND user_id = $2
@@ -422,7 +453,7 @@ async fn events(
 async fn fetch_job(state: &AppState, user_id: Uuid, job_id: Uuid) -> ApiResult<AnalysisResponse> {
     sqlx::query_as::<_, AnalysisResponse>(
         r#"
-        SELECT id, document_id, model_profile_id, status, stage, progress,
+        SELECT id, document_id, model_profile_id, analysis_profile, status, stage, progress,
                total_chunks, completed_chunks, error_code, error_message,
                report_id, created_at, started_at, completed_at
         FROM analysis_jobs WHERE id = $1 AND user_id = $2
@@ -442,7 +473,7 @@ async fn fetch_by_idempotency(
 ) -> ApiResult<Option<AnalysisResponse>> {
     Ok(sqlx::query_as::<_, AnalysisResponse>(
         r#"
-        SELECT id, document_id, model_profile_id, status, stage, progress,
+        SELECT id, document_id, model_profile_id, analysis_profile, status, stage, progress,
                total_chunks, completed_chunks, error_code, error_message,
                report_id, created_at, started_at, completed_at
         FROM analysis_jobs WHERE user_id = $1 AND idempotency_key = $2
@@ -452,4 +483,111 @@ async fn fetch_by_idempotency(
     .bind(key)
     .fetch_optional(&state.pool)
     .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ApiMetrics;
+    use std::sync::Arc;
+    use textcomb_core::{AppConfig, auth::UserIdentity, storage::LocalStorage};
+
+    #[tokio::test]
+    async fn concurrent_requests_create_only_one_job_for_a_document() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let user_id = Uuid::new_v4();
+        let document_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4();
+        let storage_root = std::env::temp_dir().join(format!("textcomb-job-test-{document_id}"));
+        let state = AppState {
+            pool: pool.clone(),
+            config: Arc::new(AppConfig::from_env().unwrap()),
+            storage: LocalStorage::new(&storage_root).await.unwrap(),
+            metrics: ApiMetrics::new().unwrap(),
+        };
+        let user = AuthUser(UserIdentity {
+            id: user_id,
+            username: format!("job-{user_id}"),
+            role: "user".to_owned(),
+        });
+        sqlx::query(
+            "INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')",
+        )
+        .bind(user_id)
+        .bind(&user.0.username)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
+            .bind(profile_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO documents(id, user_id, original_name, media_type, document_format, size_bytes, storage_path, input_expires_at) VALUES($1,$2,'test.txt','text/plain','txt',4,$3,now() + interval '1 hour')")
+            .bind(document_id)
+            .bind(user_id)
+            .bind(storage_root.join("test.txt").to_string_lossy().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let input = || {
+            Json(CreateAnalysisRequest {
+                document_id,
+                model_profile_id: profile_id,
+                analysis_profile: Some(AnalysisProfile::Academic),
+            })
+        };
+        let (first, second) = tokio::join!(
+            create(
+                State(state.clone()),
+                user.clone(),
+                HeaderMap::new(),
+                input()
+            ),
+            create(State(state), user, HeaderMap::new(), input()),
+        );
+        assert_eq!(first.is_ok() as u8 + second.is_ok() as u8, 1);
+        let conflict = first.err().or_else(|| second.err()).unwrap();
+        assert_eq!(conflict.0.code(), ErrorCode::Conflict);
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM analysis_jobs WHERE document_id = $1")
+                .bind(document_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+
+        let (analysis_profile, snapshot): (String, serde_json::Value) = sqlx::query_as(
+            "SELECT analysis_profile, model_snapshot FROM analysis_jobs WHERE document_id = $1",
+        )
+        .bind(document_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(analysis_profile, "academic");
+        assert_eq!(snapshot["analysis_profile"], "academic");
+        assert!(
+            snapshot["candidate_system_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("当前场景：学术论文")
+        );
+
+        sqlx::query("DELETE FROM analysis_jobs WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(storage_root).await.unwrap();
+    }
 }

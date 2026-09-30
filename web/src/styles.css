@@ -1656,6 +1656,40 @@ svg {
   background: #faf9f5;
 }
 
+.source-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 17px;
+  border-bottom: 1px solid #e7e4dc;
+}
+
+.source-navigation input {
+  width: 90px;
+  margin-left: 5px;
+}
+
+.missed-review {
+  display: grid;
+  gap: 12px;
+  padding: 14px 18px 22px;
+  border-top: 1px solid #e7e4dc;
+}
+
+.missed-form {
+  display: grid;
+  gap: 12px;
+}
+
+.missed-form textarea {
+  width: 100%;
+}
+
+.missed-list p {
+  line-height: 1.7;
+}
+
 .source-meta {
   position: sticky;
   top: 0;

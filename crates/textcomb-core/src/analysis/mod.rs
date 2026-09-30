@@ -8,7 +8,9 @@ use std::{
     collections::{HashMap, HashSet},
     sync::OnceLock,
 };
-use textcomb_domain::{EvidenceRef, GrammarSubtype, Issue, IssueCategory, IssueLevel};
+use textcomb_domain::{
+    AnalysisProfile, EvidenceRef, GrammarSubtype, Issue, IssueCategory, IssueLevel,
+};
 use uuid::Uuid;
 
 pub const TARGET_CHUNK_CHARS: usize = 3_000;
@@ -20,6 +22,8 @@ pub struct AnalysisChunk {
     pub index: usize,
     pub source_start: usize,
     pub source_end: usize,
+    pub core_start: usize,
+    pub core_end: usize,
     pub text: String,
 }
 
@@ -42,22 +46,47 @@ pub fn chunk_text(text: &str) -> Vec<AnalysisChunk> {
     let mut chunks = Vec::new();
     let mut current_start = None;
     let mut current_end = 0_usize;
+    let mut current_core_start = None;
+    let mut current_core_end = 0_usize;
     let mut previous_paragraph: Option<(usize, usize)> = None;
 
     for (paragraph_start, paragraph_end) in paragraphs {
         let paragraph_len = paragraph_end.saturating_sub(paragraph_start);
         if paragraph_len > HARD_CHUNK_CHARS {
             if let Some(start) = current_start.take() {
-                push_chunk(&mut chunks, text, start, current_end);
+                push_chunk(
+                    &mut chunks,
+                    text,
+                    start,
+                    current_end,
+                    current_core_start.take().unwrap_or(start),
+                    current_core_end,
+                );
             }
             let mut cursor = paragraph_start;
+            let mut core_start = paragraph_start;
             while cursor < paragraph_end {
                 let end = split_long_paragraph(text, cursor, paragraph_end);
-                push_chunk(&mut chunks, text, cursor, end);
+                let next_start = if end >= paragraph_end {
+                    end
+                } else {
+                    end.saturating_sub(MAX_OVERLAP_CHARS).max(cursor + 1)
+                };
+                // Adjacent chunks share a context window. Give each character
+                // in that window to exactly one chunk by splitting it in half.
+                // The midpoint also lets a short quote crossing the ownership
+                // boundary be accepted once by its midpoint.
+                let core_end = if next_start < end {
+                    next_start + (end - next_start) / 2
+                } else {
+                    end
+                };
+                push_chunk(&mut chunks, text, cursor, end, core_start, core_end);
                 if end >= paragraph_end {
                     break;
                 }
-                cursor = end.saturating_sub(MAX_OVERLAP_CHARS).max(cursor + 1);
+                cursor = next_start;
+                core_start = core_end;
             }
             previous_paragraph = Some((paragraph_start, paragraph_end));
             current_end = paragraph_end;
@@ -68,7 +97,14 @@ pub fn chunk_text(text: &str) -> Vec<AnalysisChunk> {
         let proposed_len = paragraph_end.saturating_sub(proposed_start);
         if current_start.is_some() && proposed_len > TARGET_CHUNK_CHARS {
             let start = current_start.take().expect("checked above");
-            push_chunk(&mut chunks, text, start, current_end);
+            push_chunk(
+                &mut chunks,
+                text,
+                start,
+                current_end,
+                current_core_start.take().unwrap_or(start),
+                current_core_end,
+            );
             let overlap_start = previous_paragraph
                 .filter(|(start, end)| {
                     end.saturating_sub(*start) <= MAX_OVERLAP_CHARS
@@ -77,17 +113,27 @@ pub fn chunk_text(text: &str) -> Vec<AnalysisChunk> {
                 .map(|(start, _)| start)
                 .unwrap_or(paragraph_start);
             current_start = Some(overlap_start);
+            current_core_start = Some(paragraph_start);
         } else if current_start.is_none() {
             current_start = Some(paragraph_start);
+            current_core_start = Some(paragraph_start);
         }
         current_end = paragraph_end;
+        current_core_end = paragraph_end;
         previous_paragraph = Some((paragraph_start, paragraph_end));
     }
 
     if let Some(start) = current_start
         && current_end > start
     {
-        push_chunk(&mut chunks, text, start, current_end);
+        push_chunk(
+            &mut chunks,
+            text,
+            start,
+            current_end,
+            current_core_start.unwrap_or(start),
+            current_core_end,
+        );
     }
     for (index, chunk) in chunks.iter_mut().enumerate() {
         chunk.index = index;
@@ -145,13 +191,22 @@ fn paragraph_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn push_chunk(chunks: &mut Vec<AnalysisChunk>, text: &str, start: usize, end: usize) {
+fn push_chunk(
+    chunks: &mut Vec<AnalysisChunk>,
+    text: &str,
+    start: usize,
+    end: usize,
+    core_start: usize,
+    core_end: usize,
+) {
     let content: String = text.chars().skip(start).take(end - start).collect();
     if !content.trim().is_empty() {
         chunks.push(AnalysisChunk {
             index: chunks.len(),
             source_start: start,
             source_end: end,
+            core_start: core_start.clamp(start, end),
+            core_end: core_end.clamp(core_start.clamp(start, end), end),
             text: content,
         });
     }
@@ -160,6 +215,7 @@ fn push_chunk(chunks: &mut Vec<AnalysisChunk>, text: &str, start: usize, end: us
 pub fn resolve_candidates(
     chunk: &AnalysisChunk,
     candidates: Vec<CandidateIssue>,
+    analysis_profile: AnalysisProfile,
 ) -> Vec<ResolvedCandidate> {
     candidates
         .into_iter()
@@ -174,6 +230,10 @@ pub fn resolve_candidates(
             let quote_len = candidate.quote.chars().count();
             let source_start = chunk.source_start + local_start;
             let source_end = source_start + quote_len;
+            let source_midpoint = source_start + quote_len / 2;
+            if source_midpoint < chunk.core_start || source_midpoint >= chunk.core_end {
+                return None;
+            }
             Some(ResolvedCandidate {
                 candidate_index,
                 source_start,
@@ -188,6 +248,8 @@ pub fn resolve_candidates(
                     &chunk.text,
                     local_start,
                     local_start + quote_len,
+                    analysis_profile,
+                    candidate.category,
                 ),
             })
         })
@@ -203,8 +265,11 @@ fn locate_unique(
     if quote.trim().is_empty() {
         return None;
     }
+    // `match_indices` skips overlapping occurrences (for example, 哈哈 in 哈哈哈).
+    // Every character boundary must be checked before a quote can be called unique.
     let matches: Vec<usize> = text
-        .match_indices(quote)
+        .char_indices()
+        .filter(|(byte_index, _)| text[*byte_index..].starts_with(quote))
         .map(|(byte_index, _)| text[..byte_index].chars().count())
         .collect();
     if matches.len() == 1 {
@@ -241,20 +306,75 @@ fn locate_unique(
     (filtered.len() == 1).then(|| filtered[0])
 }
 
-fn overlaps_protected_span(text: &str, start: usize, end: usize) -> bool {
-    static PROTECTED: OnceLock<Regex> = OnceLock::new();
-    let regex = PROTECTED.get_or_init(|| {
+fn overlaps_protected_span(
+    text: &str,
+    start: usize,
+    end: usize,
+    analysis_profile: AnalysisProfile,
+    category: IssueCategory,
+) -> bool {
+    static BASE_PROTECTED: OnceLock<Regex> = OnceLock::new();
+    static ACADEMIC_PROTECTED: OnceLock<Regex> = OnceLock::new();
+    static FINANCIAL_PROTECTED: OnceLock<Regex> = OnceLock::new();
+    let base = BASE_PROTECTED.get_or_init(|| {
         Regex::new(
             r#"(?x)
             https?://[^\s]+ |
             www\.[^\s]+ |
             `[^`]+` |
             \$[^$]+\$ |
-            [A-Za-z][A-Za-z0-9+.-]*://[^\s]+
-            "#,
+            [A-Za-z][A-Za-z0-9+.-]*://[^\s]+ |
+            \\begin\{(?:equation|align\*?|math|displaymath)\}[\s\S]*?\\end\{(?:equation|align\*?|math|displaymath)\} |
+            \\\([\s\S]*?\\\) |
+            \\\[[\s\S]*?\\\]
+        "#,
         )
-        .expect("protected span regex is valid")
+        .expect("base protected span regex is valid")
     });
+    let academic = ACADEMIC_PROTECTED.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            (?i:10\.\d{4,9}/[-._;()/:A-Z0-9]+) |
+            \[\d{1,4}(?:\s*[-,，、]\s*\d{1,4})*\]
+        "#,
+        )
+        .expect("academic protected span regex is valid")
+    });
+    let financial = FINANCIAL_PROTECTED.get_or_init(|| {
+        Regex::new(
+            r#"(?xi)
+            [¥￥$€£]\s*\d[\d,，]*(?:\.\d+)? |
+            \d[\d,，]*(?:\.\d+)?(?:%|‰|亿元|万元|人民币|美元|元|万|亿|股|人次) |
+            \d{4}年(?:\d{1,2}月(?:\d{1,2}日)?)? |
+            \d{6}\.(?:sh|sz|bj)
+        "#,
+        )
+        .expect("financial protected span regex is valid")
+    });
+    let matches = |regex: &Regex| {
+        if category == IssueCategory::Grammar {
+            regex_covers(regex, text, start, end)
+        } else {
+            regex_overlaps(regex, text, start, end)
+        }
+    };
+    matches(base)
+        || match analysis_profile {
+            AnalysisProfile::General => false,
+            AnalysisProfile::Academic => matches(academic),
+            AnalysisProfile::Financial => matches(financial),
+        }
+}
+
+fn regex_covers(regex: &Regex, text: &str, start: usize, end: usize) -> bool {
+    regex.find_iter(text).any(|found| {
+        let match_start = text[..found.start()].chars().count();
+        let match_end = match_start + found.as_str().chars().count();
+        match_start <= start && match_end >= end
+    })
+}
+
+fn regex_overlaps(regex: &Regex, text: &str, start: usize, end: usize) -> bool {
     regex.find_iter(text).any(|found| {
         let match_start = text[..found.start()].chars().count();
         let match_end = match_start + found.as_str().chars().count();
@@ -278,22 +398,33 @@ pub fn finalize_issues(
         else {
             continue;
         };
-        let effective_confidence = candidate.candidate_confidence.min(verdict.confidence);
         if verdict.verdict == VerificationVerdict::Rejected
-            || effective_confidence < suspected_threshold
+            || verdict.confidence < suspected_threshold
         {
             continue;
         }
-        let mut level = if effective_confidence >= confirmed_threshold
+        let category = verdict.category.unwrap_or(candidate.category);
+        let grammar_subtype = if verdict.category.is_some() {
+            verdict.grammar_subtype
+        } else {
+            candidate.grammar_subtype
+        };
+        let classification_changed = verdict.category.is_some()
+            && (category != candidate.category
+                || (category == IssueCategory::Grammar
+                    && grammar_subtype != candidate.grammar_subtype));
+        let mut level = if candidate.candidate_confidence >= confirmed_threshold
+            && verdict.confidence >= confirmed_threshold
             && verdict.verdict == VerificationVerdict::Confirmed
         {
             IssueLevel::Confirmed
         } else {
             IssueLevel::Suspected
         };
-        if candidate.category == IssueCategory::Paragraph
+        if classification_changed
+            || category == IssueCategory::Paragraph
             || candidate.protected
-            || requires_contextual_review(candidate)
+            || requires_contextual_review(category, grammar_subtype)
         {
             level = IssueLevel::Suspected;
         }
@@ -302,7 +433,9 @@ pub fn finalize_issues(
             .evidence_source_ids
             .iter()
             .filter_map(|source_id| {
-                if seen_sources.insert(source_id.clone()) {
+                if seen_sources.insert(source_id.clone())
+                    && evidence_allowed_for_category(source_id, category)
+                {
                     evidence.get(source_id).cloned()
                 } else {
                     None
@@ -316,22 +449,14 @@ pub fn finalize_issues(
         )?;
         issues.push(Issue {
             id: Uuid::new_v4(),
-            category: candidate.category,
-            grammar_subtype: candidate.grammar_subtype,
+            category,
+            grammar_subtype,
             level,
             location,
             original_text: candidate.quote.clone(),
-            reason: if verdict.reason.trim().is_empty() {
-                candidate.reason.clone()
-            } else {
-                verdict.reason
-            },
-            suggestion: if verdict.suggestion.trim().is_empty() {
-                candidate.suggestion.clone()
-            } else {
-                verdict.suggestion
-            },
-            confidence: effective_confidence.min(100),
+            reason: verdict.reason,
+            suggestion: verdict.suggestion,
+            confidence: verdict.confidence.min(100),
             evidence_refs,
             feedback: None,
         });
@@ -341,14 +466,25 @@ pub fn finalize_issues(
 
 /// These diagnoses often depend on intent or discourse outside the sentence.
 /// Keep them reviewable without presenting an AI inference as a mandatory edit.
-fn requires_contextual_review(candidate: &ResolvedCandidate) -> bool {
-    candidate.category == IssueCategory::Grammar
+fn requires_contextual_review(
+    category: IssueCategory,
+    grammar_subtype: Option<GrammarSubtype>,
+) -> bool {
+    category == IssueCategory::Grammar
         && matches!(
-            candidate.grammar_subtype,
+            grammar_subtype,
             Some(
                 GrammarSubtype::Ambiguity | GrammarSubtype::Illogical | GrammarSubtype::WordMisuse
             )
         )
+}
+
+fn evidence_allowed_for_category(source_id: &str, category: IssueCategory) -> bool {
+    matches!(
+        (source_id, category),
+        ("gb-t-15834-2011", IssueCategory::Punctuation)
+            | ("standard-chinese-characters-2013", IssueCategory::Typo)
+    )
 }
 
 pub fn deduplicate_issues(mut issues: Vec<Issue>) -> Vec<Issue> {
@@ -412,6 +548,13 @@ mod tests {
         );
         assert_eq!(chunks.first().unwrap().source_start, 0);
         assert_eq!(chunks.last().unwrap().source_end, text.chars().count());
+        assert_eq!(chunks.first().unwrap().core_start, 0);
+        assert_eq!(chunks.last().unwrap().core_end, text.chars().count());
+        assert!(chunks.windows(2).all(|pair| {
+            pair[0].core_end <= pair[1].core_start
+                && pair[0].core_start < pair[0].core_end
+                && pair[1].core_start < pair[1].core_end
+        }));
     }
 
     #[test]
@@ -429,7 +572,39 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].source_end > pair[1].source_start)
         );
+        assert!(
+            chunks
+                .windows(2)
+                .all(|pair| pair[0].core_end == pair[1].core_start)
+        );
+        assert_eq!(chunks.first().unwrap().core_start, 0);
+        assert_eq!(chunks.last().unwrap().core_end, text.chars().count());
         assert_eq!(chunks.last().unwrap().source_end, text.chars().count());
+    }
+
+    #[test]
+    fn long_paragraph_boundary_quote_is_owned_once() {
+        let quote = "唯一边界片段";
+        let text = format!("{}{}{}", "甲".repeat(3_748), quote, "乙".repeat(5_000));
+        let chunks = chunk_text(&text);
+        let candidate = CandidateIssue {
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            quote: quote.to_owned(),
+            context_before: None,
+            context_after: None,
+            reason: "测试".to_owned(),
+            suggestion: "测试".to_owned(),
+            confidence: 90,
+            evidence_source_ids: Vec::new(),
+        };
+        let owned = chunks
+            .iter()
+            .map(|chunk| {
+                resolve_candidates(chunk, vec![candidate.clone()], AnalysisProfile::General).len()
+            })
+            .sum::<usize>();
+        assert_eq!(owned, 1);
     }
 
     #[test]
@@ -437,6 +612,76 @@ mod tests {
         let text = "他说很好。她也说很好。";
         assert!(locate_unique(text, "很好", None, None).is_none());
         assert_eq!(locate_unique(text, "很好", Some("他说"), None), Some(2));
+    }
+
+    #[test]
+    fn academic_and_financial_fragments_are_protected_for_review() {
+        let text = r#"公式 \(x^2 + y^2\)，引用[12-14]，DOI 10.1234/example.1，增长率 12.5%。"#;
+        let range = |quote: &str| {
+            let start = locate_unique(text, quote, None, None).expect("quote is unique");
+            (start, start + quote.chars().count())
+        };
+        let (formula_start, formula_end) = range("x^2 + y^2");
+        assert!(overlaps_protected_span(
+            text,
+            formula_start,
+            formula_end,
+            AnalysisProfile::General,
+            IssueCategory::Typo
+        ));
+        for quote in ["12-14", "10.1234/example.1"] {
+            let (start, end) = range(quote);
+            assert!(overlaps_protected_span(
+                text,
+                start,
+                end,
+                AnalysisProfile::Academic,
+                IssueCategory::Typo
+            ));
+            assert!(!overlaps_protected_span(
+                text,
+                start,
+                end,
+                AnalysisProfile::General,
+                IssueCategory::Typo
+            ));
+        }
+        let (percentage_start, percentage_end) = range("12.5%");
+        assert!(overlaps_protected_span(
+            text,
+            percentage_start,
+            percentage_end,
+            AnalysisProfile::Financial,
+            IssueCategory::Typo
+        ));
+        assert!(!overlaps_protected_span(
+            text,
+            percentage_start,
+            percentage_end,
+            AnalysisProfile::General,
+            IssueCategory::Typo
+        ));
+        let sentence = "2025年，公司的经营状况得到了提高。";
+        assert!(!overlaps_protected_span(
+            sentence,
+            0,
+            sentence.chars().count(),
+            AnalysisProfile::Financial,
+            IssueCategory::Grammar
+        ));
+        assert!(overlaps_protected_span(
+            sentence,
+            0,
+            5,
+            AnalysisProfile::Financial,
+            IssueCategory::Typo
+        ));
+    }
+
+    #[test]
+    fn overlapping_quotes_are_ambiguous_without_context() {
+        assert_eq!(locate_unique("哈哈哈", "哈哈", None, None), None);
+        assert_eq!(locate_unique("哈哈哈", "哈哈", None, Some("哈")), Some(0));
     }
 
     #[test]
@@ -470,6 +715,8 @@ mod tests {
             vec![candidate],
             vec![VerifiedCandidate {
                 candidate_index: 0,
+                category: None,
+                grammar_subtype: None,
                 verdict: VerificationVerdict::Confirmed,
                 confidence: 100,
                 reason: "上下文不足以排除其他读法".to_owned(),
@@ -482,6 +729,118 @@ mod tests {
         )
         .unwrap();
         assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].level, IssueLevel::Suspected);
+    }
+
+    #[test]
+    fn reviewer_can_rescue_low_scored_candidate_only_as_suspected() {
+        let document = ExtractedDocument {
+            format: textcomb_domain::DocumentFormat::Txt,
+            text: "他心情很繁重。".to_owned(),
+            segments: vec![crate::documents::SourceSegment {
+                char_start: 0,
+                char_end: 7,
+                page: None,
+                line: Some(1),
+                paragraph_index: 0,
+            }],
+            char_count: 7,
+        };
+        let candidate = ResolvedCandidate {
+            candidate_index: 0,
+            source_start: 1,
+            source_end: 6,
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            quote: "心情很繁重".to_owned(),
+            reason: "初检理由".to_owned(),
+            suggestion: "初检建议".to_owned(),
+            candidate_confidence: 30,
+            protected: false,
+        };
+        let reviewed = VerifiedCandidate {
+            candidate_index: 0,
+            category: Some(IssueCategory::Grammar),
+            grammar_subtype: Some(GrammarSubtype::WordOrder),
+            verdict: VerificationVerdict::Confirmed,
+            confidence: 90,
+            reason: "心情与繁重搭配不当".to_owned(),
+            suggestion: "心情很沉重".to_owned(),
+            evidence_source_ids: Vec::new(),
+        };
+        let issues = finalize_issues(
+            &document,
+            vec![candidate],
+            vec![reviewed],
+            &HashMap::new(),
+            80,
+            50,
+        )
+        .unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].level, IssueLevel::Suspected);
+        assert_eq!(issues[0].confidence, 90);
+        assert_eq!(issues[0].grammar_subtype, Some(GrammarSubtype::WordOrder));
+    }
+
+    #[test]
+    fn evidence_source_must_match_issue_category() {
+        assert!(evidence_allowed_for_category(
+            "gb-t-15834-2011",
+            IssueCategory::Punctuation
+        ));
+        assert!(!evidence_allowed_for_category(
+            "gb-t-15834-2011",
+            IssueCategory::Grammar
+        ));
+    }
+
+    #[test]
+    fn independent_reclassification_is_reviewable_but_not_confirmed() {
+        let document = ExtractedDocument {
+            format: textcomb_domain::DocumentFormat::Txt,
+            text: "他心情很繁重。".to_owned(),
+            segments: vec![crate::documents::SourceSegment {
+                char_start: 0,
+                char_end: 7,
+                page: None,
+                line: Some(1),
+                paragraph_index: 0,
+            }],
+            char_count: 7,
+        };
+        let candidate = ResolvedCandidate {
+            candidate_index: 0,
+            source_start: 1,
+            source_end: 6,
+            category: IssueCategory::Grammar,
+            grammar_subtype: Some(GrammarSubtype::Collocation),
+            quote: "心情很繁重".to_owned(),
+            reason: "搭配".to_owned(),
+            suggestion: "心情很沉重".to_owned(),
+            candidate_confidence: 95,
+            protected: false,
+        };
+        let verdict = VerifiedCandidate {
+            candidate_index: 0,
+            category: Some(IssueCategory::Grammar),
+            grammar_subtype: Some(GrammarSubtype::WordMisuse),
+            verdict: VerificationVerdict::Confirmed,
+            confidence: 95,
+            reason: "复核后认为词语使用不当".to_owned(),
+            suggestion: "心情很沉重".to_owned(),
+            evidence_source_ids: Vec::new(),
+        };
+        let issues = finalize_issues(
+            &document,
+            vec![candidate],
+            vec![verdict],
+            &HashMap::new(),
+            80,
+            50,
+        )
+        .unwrap();
+        assert_eq!(issues[0].grammar_subtype, Some(GrammarSubtype::WordMisuse));
         assert_eq!(issues[0].level, IssueLevel::Suspected);
     }
 }

@@ -12,8 +12,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path as FilePath, str::FromStr};
-use textcomb_core::{CoreError, ErrorCode, db};
-use textcomb_domain::{FeedbackVerdict, Issue, IssueCategory, IssueLevel, ReportV1};
+use textcomb_core::{CoreError, ErrorCode, db, reporting};
+use textcomb_domain::{
+    FeedbackVerdict, Issue, IssueCategory, IssueLevel, MissedIssueFeedback, ReportV1,
+};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -21,6 +23,11 @@ pub fn router() -> Router<AppState> {
         .route("/reports/{id}/source", get(get_source))
         .route("/reports/{id}", get(get_report).delete(delete_report))
         .route("/reports/{id}/issues", get(list_issues))
+        .route("/reports/{id}/misses", post(add_missed_issue))
+        .route(
+            "/reports/{id}/misses/{miss_id}",
+            axum::routing::delete(delete_missed_issue),
+        )
         .route("/reports/{id}/export/{format}", get(export))
         .route("/issues/{id}/feedback", post(feedback))
 }
@@ -30,13 +37,22 @@ struct ReportSourceResponse {
     original_name: String,
     document_format: String,
     char_count: u32,
+    char_start: u32,
+    char_end: u32,
     text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceQuery {
+    start: Option<u32>,
+    end: Option<u32>,
 }
 
 async fn get_source(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(report_id): Path<Uuid>,
+    Query(query): Query<SourceQuery>,
 ) -> ApiResult<Json<ReportSourceResponse>> {
     let source = db::load_report_source(&state.pool, report_id, user.id).await?;
     let text = source.extracted_text.ok_or_else(|| {
@@ -45,15 +61,31 @@ async fn get_source(
             "这份历史报告的分析原文已按旧策略清理；请重新分析后查看",
         ))
     })?;
+    let chars: Vec<char> = text.chars().collect();
     let char_count = source
         .char_count
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or_else(|| u32::try_from(text.chars().count()).unwrap_or(u32::MAX));
+        .unwrap_or_else(|| u32::try_from(chars.len()).unwrap_or(u32::MAX));
+    let total = chars.len();
+    let start = usize::try_from(query.start.unwrap_or(0))
+        .unwrap_or(0)
+        .min(total);
+    let requested_end = query
+        .end
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_else(|| start.saturating_add(8_000));
+    let end = requested_end
+        .max(start)
+        .min(total)
+        .min(start.saturating_add(12_000));
+    let window: String = chars[start..end].iter().collect();
     Ok(Json(ReportSourceResponse {
         original_name: source.original_name,
         document_format: source.document_format,
         char_count,
-        text,
+        char_start: u32::try_from(start).unwrap_or(u32::MAX),
+        char_end: u32::try_from(end).unwrap_or(u32::MAX),
+        text: window,
     }))
 }
 
@@ -104,7 +136,126 @@ async fn load_enriched_report(
             issue.feedback = FeedbackVerdict::from_str(&verdict).ok();
         }
     }
+    let misses: Vec<(Uuid, String, i32, i32, String, String, time::OffsetDateTime)> =
+        sqlx::query_as(
+            r#"
+            SELECT id, category, char_start, char_end, quote, note, created_at
+            FROM missed_issue_feedback
+            WHERE report_id = $1 AND user_id = $2
+            ORDER BY created_at, id
+            "#,
+        )
+        .bind(report_id)
+        .bind(user_id)
+        .fetch_all(&state.pool)
+        .await?;
+    report.missed_issues = misses
+        .into_iter()
+        .filter_map(|(id, category, start, end, quote, note, created_at)| {
+            Some(MissedIssueFeedback {
+                id,
+                category: IssueCategory::from_str(&category).ok()?,
+                char_start: u32::try_from(start).ok()?,
+                char_end: u32::try_from(end).ok()?,
+                quote,
+                note,
+                created_at,
+            })
+        })
+        .collect();
     Ok(report)
+}
+
+#[derive(Debug, Deserialize)]
+struct MissedIssueRequest {
+    category: IssueCategory,
+    char_start: u32,
+    char_end: u32,
+    note: String,
+}
+
+async fn add_missed_issue(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(report_id): Path<Uuid>,
+    Json(input): Json<MissedIssueRequest>,
+) -> ApiResult<(StatusCode, Json<MissedIssueFeedback>)> {
+    let source = db::load_report_source(&state.pool, report_id, user.id).await?;
+    let text = source.extracted_text.ok_or_else(|| {
+        ApiError(CoreError::public(
+            ErrorCode::NotFound,
+            "分析原文已清理，无法标记漏检",
+        ))
+    })?;
+    let chars: Vec<char> = text.chars().collect();
+    let start = input.char_start as usize;
+    let end = input.char_end as usize;
+    if start >= end || end > chars.len() || end - start > 300 {
+        return Err(ApiError(CoreError::public(
+            ErrorCode::ConfigurationInvalid,
+            "请选择原文中不超过 300 字的漏检片段",
+        )));
+    }
+    let note = input.note.trim();
+    if note.is_empty() || note.chars().count() > 1_000 {
+        return Err(ApiError(CoreError::public(
+            ErrorCode::ConfigurationInvalid,
+            "请填写 1–1000 字的漏检说明",
+        )));
+    }
+    let id = Uuid::new_v4();
+    let quote: String = chars[start..end].iter().collect();
+    let created_at: time::OffsetDateTime = sqlx::query_scalar(
+        r#"
+        INSERT INTO missed_issue_feedback(id, report_id, user_id, category, char_start, char_end, quote, note)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING created_at
+        "#,
+    )
+    .bind(id)
+    .bind(report_id)
+    .bind(user.id)
+    .bind(input.category.as_str())
+    .bind(input.char_start as i32)
+    .bind(input.char_end as i32)
+    .bind(&quote)
+    .bind(note)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(MissedIssueFeedback {
+            id,
+            category: input.category,
+            char_start: input.char_start,
+            char_end: input.char_end,
+            quote,
+            note: note.to_owned(),
+            created_at,
+        }),
+    ))
+}
+
+async fn delete_missed_issue(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path((report_id, miss_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<StatusCode> {
+    let result = sqlx::query(
+        "DELETE FROM missed_issue_feedback WHERE id = $1 AND report_id = $2 AND user_id = $3",
+    )
+    .bind(miss_id)
+    .bind(report_id)
+    .bind(user.id)
+    .execute(&state.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError(CoreError::public(
+            ErrorCode::NotFound,
+            "漏检反馈不存在",
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,10 +346,10 @@ async fn export(
     AuthUser(user): AuthUser,
     Path((report_id, format)): Path<(Uuid, String)>,
 ) -> ApiResult<Response<Body>> {
-    let record = db::load_report(&state.pool, report_id, user.id).await?;
+    let report = load_enriched_report(&state, user.id, report_id).await?;
     match format.as_str() {
         "json" => {
-            let bytes = serde_json::to_vec_pretty(&record.content_json)?;
+            let bytes = serde_json::to_vec_pretty(&report)?;
             attachment(
                 bytes,
                 "application/json; charset=utf-8",
@@ -206,15 +357,18 @@ async fn export(
             )
         }
         "md" | "markdown" => attachment(
-            record.markdown.into_bytes(),
+            reporting::to_markdown(&report).into_bytes(),
             "text/markdown; charset=utf-8",
             "textcomb-report.md",
         ),
         "pdf" => {
-            let path = record.pdf_path.ok_or_else(|| {
-                ApiError(CoreError::public(ErrorCode::NotFound, "PDF 报告不存在"))
-            })?;
-            let bytes = tokio::fs::read(path).await?;
+            let export_id = Uuid::new_v4();
+            let path = state.storage.temporary_path(export_id, "pdf");
+            let source_path = state.storage.temporary_path(export_id, "typ");
+            reporting::render_pdf(&report, &path, &source_path).await?;
+            let result = state.storage.read(&path).await;
+            state.storage.remove(&path).await?;
+            let bytes = result?;
             attachment(bytes, "application/pdf", "textcomb-report.pdf")
         }
         _ => Err(ApiError(CoreError::public(

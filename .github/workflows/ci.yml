@@ -71,6 +71,7 @@ jobs:
           --health-retries 20
     env:
       TEXTCOMB_DATABASE_URL: postgres://textcomb:textcomb-ci@localhost:5432/textcomb
+      TEXTCOMB_TEST_DATABASE_URL: postgres://textcomb:textcomb-ci@localhost:5432/textcomb
       TEXTCOMB_MASTER_KEY_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       TEXTCOMB_SECURE_COOKIES: "false"
     steps:
@@ -88,6 +89,10 @@ jobs:
           count=$(docker exec ${{ job.services.postgres.id }} \
             psql -U textcomb -d textcomb -Atc "select count(*) from evidence_entries")
           test "$count" -eq 3
+      - name: Verify input retention against PostgreSQL
+        run: cargo test --locked -p textcomb-core expired_failed_input_drops_body_but_active_report_keeps_its_source
+      - name: Verify concurrent analysis creation against PostgreSQL
+        run: cargo test --locked -p textcomb-api concurrent_requests_create_only_one_job_for_a_document
 
   container:
     runs-on: ubuntu-24.04
@@ -106,6 +111,7 @@ jobs:
           context: .
           target: worker
           push: false
+          load: true
           tags: textcomb-worker:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max

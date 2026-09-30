@@ -45,11 +45,15 @@ pub struct ModelProfileResponse {
     pub created_at: OffsetDateTime,
 }
 
+fn apply_reference_evaluation_scope(profile: &mut ModelProfileResponse) {
+    profile.is_reference &= prompts::ACTIVE_REFERENCE_EVALUATION.is_some();
+}
+
 async fn list(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
 ) -> ApiResult<Json<Vec<ModelProfileResponse>>> {
-    let profiles = sqlx::query_as::<_, ModelProfileResponse>(
+    let mut profiles = sqlx::query_as::<_, ModelProfileResponse>(
         r#"
         SELECT id, name, provider_kind, base_url, candidate_model, verifier_model,
                max_concurrency, enabled, is_reference, owner_id IS NULL AS shared, created_at
@@ -61,6 +65,9 @@ async fn list(
     .bind(user.id)
     .fetch_all(&state.pool)
     .await?;
+    profiles
+        .iter_mut()
+        .for_each(apply_reference_evaluation_scope);
     Ok(Json(profiles))
 }
 
@@ -125,7 +132,7 @@ async fn create(
     let encrypted = encrypt_secret(&state.config.master_key, &SecretString::from(input.api_key))?;
     let id = Uuid::new_v4();
     let owner_id = (!shared).then_some(user.id);
-    let profile = sqlx::query_as::<_, ModelProfileResponse>(
+    let mut profile = sqlx::query_as::<_, ModelProfileResponse>(
         r#"
         INSERT INTO model_profiles(
             id, owner_id, name, provider_kind, base_url, api_key_ciphertext,
@@ -148,6 +155,7 @@ async fn create(
     .bind(fields.max_concurrency)
     .fetch_one(&state.pool)
     .await?;
+    apply_reference_evaluation_scope(&mut profile);
     Ok((StatusCode::CREATED, Json(profile)))
 }
 
@@ -170,7 +178,7 @@ async fn update(
         None => None,
     };
 
-    let profile = sqlx::query_as::<_, ModelProfileResponse>(
+    let mut profile = sqlx::query_as::<_, ModelProfileResponse>(
         r#"
         UPDATE model_profiles
         SET name = $3,
@@ -201,6 +209,8 @@ async fn update(
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| ApiError(CoreError::public(ErrorCode::NotFound, "模型配置不存在")))?;
+
+    apply_reference_evaluation_scope(&mut profile);
 
     Ok(Json(profile))
 }
@@ -386,5 +396,24 @@ mod tests {
     fn key_validation_rejects_empty_replacement_key() {
         assert!(validate_api_key("").is_err());
         assert!(validate_api_key("new-key").is_ok());
+    }
+
+    #[test]
+    fn reference_flag_is_hidden_without_an_active_evaluation_scope() {
+        let mut profile = ModelProfileResponse {
+            id: Uuid::nil(),
+            name: "参考模型".to_owned(),
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            candidate_model: "candidate".to_owned(),
+            verifier_model: "verifier".to_owned(),
+            max_concurrency: 1,
+            enabled: true,
+            is_reference: true,
+            shared: true,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        apply_reference_evaluation_scope(&mut profile);
+        assert!(!profile.is_reference);
     }
 }
