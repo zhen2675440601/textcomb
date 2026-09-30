@@ -654,6 +654,22 @@ async fn specification() -> Json<Value> {
                         "created_at": { "type": "string", "format": "date-time" }
                     }
                 },
+                "SourceLocation": {
+                    "type": "object",
+                    "required": ["document_format", "char_start", "char_end", "quote"],
+                    "properties": {
+                        "document_format": { "type": "string", "enum": ["txt", "docx", "pdf"] },
+                        "page": { "type": "integer", "minimum": 1 },
+                        "page_end": { "type": "integer", "minimum": 1, "description": "跨页片段的结束页；旧报告可能缺失" },
+                        "line_start": { "type": "integer", "minimum": 1 },
+                        "line_end": { "type": "integer", "minimum": 1 },
+                        "paragraph_index": { "type": "integer", "minimum": 0 },
+                        "sentence_index": { "type": "integer", "minimum": 0 },
+                        "char_start": { "type": "integer", "minimum": 0 },
+                        "char_end": { "type": "integer", "minimum": 1 },
+                        "quote": { "type": "string" }
+                    }
+                },
                 "Issue": {
                     "type": "object",
                     "required": [
@@ -676,7 +692,7 @@ async fn specification() -> Json<Value> {
                             ]
                         },
                         "level": { "type": "string", "enum": ["confirmed", "suspected"] },
-                        "location": { "type": "object" },
+                        "location": { "$ref": "#/components/schemas/SourceLocation" },
                         "original_text": { "type": "string" },
                         "reason": { "type": "string" },
                         "suggestion": { "type": "string" },

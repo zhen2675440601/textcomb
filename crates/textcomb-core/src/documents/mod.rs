@@ -59,6 +59,7 @@ impl ExtractedDocument {
         Ok(SourceLocation {
             document_format: self.format,
             page: first.page,
+            page_end: (last.page != first.page).then_some(last.page).flatten(),
             line_start: first.line,
             line_end: last.line,
             paragraph_index: Some(first.paragraph_index),
@@ -250,5 +251,36 @@ mod tests {
         let location = document.location(5, 8, "第二行").unwrap();
         assert_eq!(location.line_start, Some(2));
         assert_eq!(location.sentence_index, Some(1));
+        assert_eq!(location.page_end, None);
+    }
+
+    #[test]
+    fn cross_page_location_keeps_both_pages_and_line_numbers() {
+        let document = build_document(
+            DocumentFormat::Pdf,
+            vec![
+                SourceLine {
+                    text: "跨页".to_owned(),
+                    page: Some(1),
+                    line: Some(50),
+                    paragraph_break_after: false,
+                },
+                SourceLine {
+                    text: "句子".to_owned(),
+                    page: Some(2),
+                    line: Some(3),
+                    paragraph_break_after: false,
+                },
+            ],
+        );
+        let location = document
+            .location(0, document.char_count, &document.text)
+            .unwrap();
+        assert_eq!((location.page, location.page_end), (Some(1), Some(2)));
+        assert_eq!(
+            (location.line_start, location.line_end),
+            (Some(50), Some(3))
+        );
+        assert_eq!(location.quote, "跨页\n句子");
     }
 }

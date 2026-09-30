@@ -176,12 +176,12 @@ impl Worker {
         match result {
             Ok(Ok(())) => info!(job_id = %job.id, "analysis job completed"),
             Ok(Err(error)) if error.code() == ErrorCode::JobCancelled => {
-                if let Err(mark_error) = self.cancel_and_purge(&job).await {
+                if let Err(mark_error) = self.cancel_and_purge(&job, worker_id).await {
                     error!(job_id = %job.id, error = %mark_error, "failed to finalize cancellation");
                 }
             }
             Ok(Err(error)) => {
-                if self.finalize_if_cancelled(&job).await {
+                if self.finalize_if_cancelled(&job, worker_id).await {
                     return;
                 }
                 error!(job_id = %job.id, code = error.code().as_str(), "analysis job failed");
@@ -192,7 +192,7 @@ impl Worker {
                 }
             }
             Err(_) => {
-                if self.finalize_if_cancelled(&job).await {
+                if self.finalize_if_cancelled(&job, worker_id).await {
                     return;
                 }
                 let minutes = self.config.job_timeout.as_secs() / 60;
@@ -523,17 +523,17 @@ impl Worker {
         Ok(())
     }
 
-    async fn cancel_and_purge(&self, job: &db::ClaimedJob) -> CoreResult<()> {
-        if let Some(path) = db::finalize_cancelled(&self.pool, job.id).await? {
+    async fn cancel_and_purge(&self, job: &db::ClaimedJob, worker_id: &str) -> CoreResult<()> {
+        if let Some(path) = db::finalize_cancelled(&self.pool, job.id, worker_id).await? {
             self.remove_finalized_input(&path).await;
         }
         Ok(())
     }
 
-    async fn finalize_if_cancelled(&self, job: &db::ClaimedJob) -> bool {
+    async fn finalize_if_cancelled(&self, job: &db::ClaimedJob, worker_id: &str) -> bool {
         match db::is_cancel_requested(&self.pool, job.id).await {
             Ok(true) => {
-                if let Err(error) = self.cancel_and_purge(job).await {
+                if let Err(error) = self.cancel_and_purge(job, worker_id).await {
                     error!(job_id = %job.id, error = %error, "failed to finalize cancellation");
                 }
                 true

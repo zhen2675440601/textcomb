@@ -245,29 +245,38 @@ fn feedback_label(feedback: FeedbackVerdict) -> &'static str {
 
 fn location_label(location: &SourceLocation) -> String {
     if let Some(page) = location.page {
-        return format!(
-            "第 {} 页，第 {}–{} 行",
-            page,
-            location.line_start.unwrap_or(1),
-            location
-                .line_end
-                .unwrap_or(location.line_start.unwrap_or(1))
-        );
+        let start = location.line_start.unwrap_or(1);
+        let end = location.line_end.unwrap_or(start);
+        if let Some(end_page) = location.page_end
+            && end_page != page
+        {
+            return format!("第 {page} 页第 {start} 行至第 {end_page} 页第 {end} 行");
+        }
+        if location.page_end.is_none() && end < start {
+            return format!("第 {page} 页第 {start} 行起（结束页未记录）");
+        }
+        return if start == end {
+            format!("第 {page} 页，第 {start} 行")
+        } else {
+            format!("第 {page} 页，第 {start}–{end} 行")
+        };
     }
-    if location.document_format == textcomb_domain::DocumentFormat::Txt {
-        return format!(
-            "第 {}–{} 行",
-            location.line_start.unwrap_or(1),
-            location
-                .line_end
-                .unwrap_or(location.line_start.unwrap_or(1))
-        );
+    if let Some(start) = location.line_start {
+        let end = location.line_end.unwrap_or(start);
+        return if start == end {
+            format!("第 {start} 行")
+        } else {
+            format!("第 {start}–{end} 行")
+        };
     }
-    format!(
-        "第 {} 段，第 {} 句",
-        location.paragraph_index.unwrap_or(0) + 1,
-        location.sentence_index.unwrap_or(0) + 1
-    )
+    if let Some(paragraph) = location.paragraph_index {
+        let paragraph = paragraph + 1;
+        return match location.sentence_index {
+            Some(sentence) => format!("第 {paragraph} 段，第 {} 句", sentence + 1),
+            None => format!("第 {paragraph} 段"),
+        };
+    }
+    format!("字符 {}–{}", location.char_start, location.char_end)
 }
 
 fn typst_escape(value: &str) -> String {
@@ -288,6 +297,67 @@ mod tests {
         AnalysisProfile, AnalysisSnapshot, DocumentFormat, DocumentMetadata, ReportV1,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn cross_page_labels_and_legacy_reports_are_readable() {
+        let legacy = serde_json::json!({
+            "document_format": "pdf", "page": 1, "line_start": 50, "line_end": 3,
+            "char_start": 0, "char_end": 2, "quote": "测试"
+        });
+        let mut location: SourceLocation = serde_json::from_value(legacy).unwrap();
+        assert_eq!(location.page_end, None);
+        assert_eq!(
+            location_label(&location),
+            "第 1 页第 50 行起（结束页未记录）"
+        );
+        location.page_end = Some(2);
+        assert_eq!(location_label(&location), "第 1 页第 50 行至第 2 页第 3 行");
+        let encoded = serde_json::to_value(&location).unwrap();
+        assert_eq!(encoded["page_end"], 2);
+        let report = ReportV1::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            DocumentMetadata {
+                original_name: "测试.pdf".to_owned(),
+                format: DocumentFormat::Pdf,
+                char_count: 2,
+            },
+            AnalysisSnapshot {
+                analysis_profile: AnalysisProfile::General,
+                provider_kind: "openai_compatible".to_owned(),
+                candidate_model: "test".to_owned(),
+                verifier_model: "test".to_owned(),
+                prompt_version: "test".to_owned(),
+                reference_version: String::new(),
+                analyzer_version: "test".to_owned(),
+                reference_profile: false,
+            },
+            vec![Issue {
+                id: Uuid::new_v4(),
+                category: textcomb_domain::IssueCategory::Punctuation,
+                grammar_subtype: None,
+                level: IssueLevel::Suspected,
+                location: location.clone(),
+                original_text: "测试".to_owned(),
+                reason: "测试原因".to_owned(),
+                suggestion: "测试建议".to_owned(),
+                confidence: 70,
+                evidence_refs: vec![],
+                feedback: None,
+            }],
+            OffsetDateTime::UNIX_EPOCH,
+        );
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["issues"][0]["location"]["page_end"],
+            2
+        );
+        for export in [to_markdown(&report), to_typst(&report)] {
+            assert!(export.contains("第 1 页第 50 行至第 2 页第 3 行"));
+        }
+        location.page_end = None;
+        location.line_start = Some(2);
+        assert_eq!(location_label(&location), "第 1 页，第 2–3 行");
+    }
 
     #[test]
     fn empty_report_exports_readable_markdown() {

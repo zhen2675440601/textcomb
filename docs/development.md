@@ -86,6 +86,7 @@ cargo test --workspace --all-targets --locked
 cd web
 npm ci --ignore-scripts
 npm audit --omit=dev --audit-level=high
+npm test
 npm run build
 ```
 

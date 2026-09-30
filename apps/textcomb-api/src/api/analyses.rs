@@ -235,24 +235,46 @@ async fn remove(
     AuthUser(user): AuthUser,
     Path(job_id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    let row: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
+    // Hold the job/document locks through validation and deletion so retry or
+    // a Worker cannot activate the task between the status check and file removal.
+    let mut transaction = state.pool.begin().await?;
+    // Existing report deletion/expiry locks the report before its document.
+    // Use the same order to avoid removing files and then losing a deadlock victim.
+    let locked_report_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT report.id FROM reports AS report JOIN analysis_jobs AS job ON job.report_id = report.id WHERE job.id = $1 AND job.user_id = $2 AND report.user_id = $2 FOR UPDATE OF report",
+    )
+    .bind(job_id)
+    .bind(user.id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let row: Option<(Uuid, String, Option<Uuid>, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT analysis_jobs.document_id, analysis_jobs.status, reports.pdf_path
+        SELECT analysis_jobs.document_id, analysis_jobs.status, reports.id, reports.pdf_path
         FROM analysis_jobs
+        JOIN documents ON documents.id = analysis_jobs.document_id
         LEFT JOIN reports ON reports.id = analysis_jobs.report_id
         WHERE analysis_jobs.id = $1 AND analysis_jobs.user_id = $2
+        FOR UPDATE OF analysis_jobs, documents
         "#,
     )
     .bind(job_id)
     .bind(user.id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *transaction)
     .await?;
-    let Some((document_id, status, report_path)) = row else {
+    let Some((document_id, status, report_id, report_path)) = row else {
         return Err(ApiError(CoreError::public(
             ErrorCode::NotFound,
             "分析任务不存在",
         )));
     };
+    if locked_report_id != report_id {
+        // The task completed between the two queries. Retry from the report lock
+        // instead of acquiring an existing report in the reverse lock order.
+        return Err(ApiError(CoreError::public(
+            ErrorCode::Conflict,
+            "报告状态发生变化，请刷新后重试删除",
+        )));
+    }
     if matches!(
         status.as_str(),
         "queued"
@@ -272,14 +294,14 @@ async fn remove(
     let jobs_for_document: i64 =
         sqlx::query_scalar("SELECT count(*) FROM analysis_jobs WHERE document_id = $1")
             .bind(document_id)
-            .fetch_one(&state.pool)
+            .fetch_one(&mut *transaction)
             .await?;
     let document_path = if jobs_for_document == 1 {
         let path: Option<String> =
             sqlx::query_scalar("SELECT storage_path FROM documents WHERE id = $1 AND user_id = $2")
                 .bind(document_id)
                 .bind(user.id)
-                .fetch_optional(&state.pool)
+                .fetch_optional(&mut *transaction)
                 .await?
                 .flatten();
         path
@@ -293,7 +315,6 @@ async fn remove(
         state.storage.remove(std::path::Path::new(path)).await?;
     }
 
-    let mut transaction = state.pool.begin().await?;
     sqlx::query("DELETE FROM analysis_jobs WHERE id = $1 AND user_id = $2")
         .bind(job_id)
         .bind(user.id)
@@ -491,6 +512,186 @@ mod tests {
     use crate::state::ApiMetrics;
     use std::sync::Arc;
     use textcomb_core::{AppConfig, auth::UserIdentity, storage::LocalStorage};
+
+    struct DeletionFixture {
+        state: AppState,
+        user: AuthUser,
+        job_id: Uuid,
+        input_path: std::path::PathBuf,
+        application_name: String,
+    }
+
+    impl DeletionFixture {
+        async fn create(url: &str) -> Self {
+            use std::str::FromStr;
+            let user_id = Uuid::new_v4();
+            let job_id = Uuid::new_v4();
+            let document_id = Uuid::new_v4();
+            let profile_id = Uuid::new_v4();
+            let application_name = format!("deletion-{job_id}");
+            let options = sqlx::postgres::PgConnectOptions::from_str(url)
+                .unwrap()
+                .application_name(&application_name);
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(6)
+                .connect_with(options)
+                .await
+                .unwrap();
+            let root = std::env::temp_dir().join(format!("textcomb-deletion-{job_id}"));
+            let state = AppState {
+                pool: pool.clone(),
+                config: Arc::new(AppConfig::from_env().unwrap()),
+                storage: LocalStorage::new(root).await.unwrap(),
+                metrics: ApiMetrics::new().unwrap(),
+            };
+            let user = AuthUser(UserIdentity {
+                id: user_id,
+                username: format!("deletion-{user_id}"),
+                role: "user".to_owned(),
+            });
+            let input_path = state
+                .storage
+                .write_upload(document_id, "txt", "测试正文".as_bytes())
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')")
+                .bind(user_id).bind(&user.0.username).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
+                .bind(profile_id).bind(user_id).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO documents(id, user_id, original_name, media_type, document_format, size_bytes, storage_path, input_expires_at) VALUES($1,$2,'test.txt','text/plain','txt',12,$3,now() + interval '1 hour')")
+                .bind(document_id).bind(user_id).bind(input_path.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO analysis_jobs(id, user_id, document_id, model_profile_id, status, analyzer_version, timeout_at) VALUES($1,$2,$3,$4,'failed','test',now() + interval '1 hour')")
+                .bind(job_id).bind(user_id).bind(document_id).bind(profile_id).execute(&pool).await.unwrap();
+            Self {
+                state,
+                user,
+                job_id,
+                input_path,
+                application_name,
+            }
+        }
+
+        async fn wait_for_lock_waiters(&self, minimum: i64) {
+            // Observe actual PostgreSQL lock waits instead of relying on task scheduling.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiters: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock'")
+                        .bind(&self.application_name).fetch_one(&self.state.pool).await.unwrap();
+                    if waiters >= minimum { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("API requests did not reach their row lock");
+        }
+
+        async fn cleanup(&self) {
+            sqlx::query("DELETE FROM analysis_jobs WHERE id = $1")
+                .bind(self.job_id)
+                .execute(&self.state.pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user.0.id)
+                .execute(&self.state.pool)
+                .await
+                .unwrap();
+            tokio::fs::remove_dir_all(self.state.storage.root())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn deletion_preserves_input_when_retry_wins_the_job_lock() {
+        let Ok(url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let fixture = DeletionFixture::create(&url).await;
+        let mut gate = fixture.state.pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM analysis_jobs WHERE id = $1 FOR UPDATE")
+            .bind(fixture.job_id)
+            .fetch_one(&mut *gate)
+            .await
+            .unwrap();
+        let retry_task = {
+            let state = fixture.state.clone();
+            let user = fixture.user.clone();
+            let job_id = fixture.job_id;
+            tokio::spawn(
+                async move { retry(State(state), user, Path(job_id), HeaderMap::new()).await },
+            )
+        };
+        fixture.wait_for_lock_waiters(1).await;
+        let deletion_task = {
+            let state = fixture.state.clone();
+            let user = fixture.user.clone();
+            let job_id = fixture.job_id;
+            tokio::spawn(async move { remove(State(state), user, Path(job_id)).await })
+        };
+        fixture.wait_for_lock_waiters(2).await;
+        assert!(tokio::fs::try_exists(&fixture.input_path).await.unwrap());
+        gate.commit().await.unwrap();
+        assert_eq!(retry_task.await.unwrap().unwrap().0, StatusCode::ACCEPTED);
+        assert_eq!(
+            deletion_task.await.unwrap().unwrap_err().0.code(),
+            ErrorCode::Conflict
+        );
+        assert!(tokio::fs::try_exists(&fixture.input_path).await.unwrap());
+        let job = fetch_job(&fixture.state, fixture.user.0.id, fixture.job_id)
+            .await
+            .unwrap();
+        assert_eq!(job.status, "queued");
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn deletion_prevents_requeue_when_deletion_wins_the_job_lock() {
+        let Ok(url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let fixture = DeletionFixture::create(&url).await;
+        let mut gate = fixture.state.pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM analysis_jobs WHERE id = $1 FOR UPDATE")
+            .bind(fixture.job_id)
+            .fetch_one(&mut *gate)
+            .await
+            .unwrap();
+        let deletion_task = {
+            let state = fixture.state.clone();
+            let user = fixture.user.clone();
+            let job_id = fixture.job_id;
+            tokio::spawn(async move { remove(State(state), user, Path(job_id)).await })
+        };
+        fixture.wait_for_lock_waiters(1).await;
+        let retry_task = {
+            let state = fixture.state.clone();
+            let user = fixture.user.clone();
+            let job_id = fixture.job_id;
+            tokio::spawn(
+                async move { retry(State(state), user, Path(job_id), HeaderMap::new()).await },
+            )
+        };
+        fixture.wait_for_lock_waiters(2).await;
+        assert!(tokio::fs::try_exists(&fixture.input_path).await.unwrap());
+        gate.commit().await.unwrap();
+        assert_eq!(
+            deletion_task.await.unwrap().unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            retry_task.await.unwrap().unwrap_err().0.code(),
+            ErrorCode::Conflict
+        );
+        assert!(!tokio::fs::try_exists(&fixture.input_path).await.unwrap());
+        assert_eq!(
+            fetch_job(&fixture.state, fixture.user.0.id, fixture.job_id)
+                .await
+                .unwrap_err()
+                .0
+                .code(),
+            ErrorCode::NotFound
+        );
+        fixture.cleanup().await;
+    }
 
     #[tokio::test]
     async fn concurrent_requests_create_only_one_job_for_a_document() {

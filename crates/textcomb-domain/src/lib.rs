@@ -7,7 +7,10 @@ pub const REPORT_SCHEMA_V1: &str = "textcomb.report.v1";
 // This is deliberately independent from the deployment image tag: report
 // snapshots need a stable marker when analysis semantics change between
 // application releases.
-pub const ANALYZER_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+longdoc-v1-grammar-v3");
+pub const ANALYZER_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+longdoc-v1-grammar-v3-source-v2"
+);
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -139,6 +142,9 @@ pub struct SourceLocation {
     pub document_format: DocumentFormat,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<u32>,
+    /// End page for a span crossing PDF pages; absent in legacy reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_end: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_start: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -283,6 +289,7 @@ mod tests {
         let location = SourceLocation {
             document_format: DocumentFormat::Txt,
             page: None,
+            page_end: None,
             line_start: Some(1),
             line_end: Some(1),
             paragraph_index: Some(0),
