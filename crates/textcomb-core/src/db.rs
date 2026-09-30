@@ -1342,29 +1342,66 @@ pub async fn confirm_cleanup_target(pool: &PgPool, target: &CleanupTarget) -> Co
         CleanupTarget::Document(path) => confirm_document_file_removed(pool, path).await,
         CleanupTarget::Report { id, .. } => {
             let mut transaction = pool.begin().await?;
+            // Match deletion's report -> jobs -> document order, and recheck
+            // after waiting for locks before removing the source.
+            let report: Option<(Uuid, Uuid)> = sqlx::query_as(
+                "SELECT report.job_id, job.document_id FROM reports AS report JOIN analysis_jobs AS job ON job.id = report.job_id WHERE report.id = $1 AND report.expires_at < clock_timestamp() FOR UPDATE OF report",
+            )
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some((job_id, document_id)) = report else {
+                transaction.rollback().await?;
+                return Ok(());
+            };
+            let _locked_jobs = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM analysis_jobs WHERE document_id = $1 ORDER BY id FOR UPDATE",
+            )
+            .bind(document_id)
+            .fetch_all(&mut *transaction)
+            .await?;
+            sqlx::query("SELECT id FROM documents WHERE id = $1 FOR UPDATE")
+                .bind(document_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM reports WHERE id = $1")
+                .bind(id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("UPDATE analysis_jobs SET status = 'expired', stage = 'expired', report_id = NULL WHERE id = $1 AND status = 'completed'")
+                .bind(job_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "UPDATE analysis_chunks AS chunk SET content = NULL, candidate_output = NULL, verifier_output = NULL, updated_at = now() FROM analysis_jobs AS job WHERE chunk.job_id = job.id AND job.id = $1 AND job.status = 'expired'",
+            )
+            .bind(job_id)
+            .execute(&mut *transaction)
+            .await?;
             sqlx::query(
                 r#"
-                WITH deleted AS (
-                    DELETE FROM reports WHERE id = $1 AND expires_at < now()
-                    RETURNING job_id
-                ), source_document AS (
-                    SELECT job.document_id
-                    FROM analysis_jobs AS job
-                    JOIN deleted ON deleted.job_id = job.id
-                )
                 UPDATE documents AS document
                 SET extracted_text = NULL
-                WHERE document.id IN (SELECT document_id FROM source_document)
+                WHERE document.id = $1
+                  AND NOT EXISTS (
+                    SELECT 1 FROM analysis_jobs AS consumer
+                    WHERE consumer.document_id = document.id
+                      AND (
+                        consumer.status NOT IN ('completed','failed','cancelled','expired')
+                        OR (consumer.status = 'failed' AND document.storage_path IS NOT NULL
+                            AND document.input_expires_at > clock_timestamp())
+                      )
+                  )
                   AND NOT EXISTS (
                     SELECT 1
                     FROM reports AS remaining
                     JOIN analysis_jobs AS remaining_job ON remaining_job.id = remaining.job_id
                     WHERE remaining_job.document_id = document.id
-                      AND remaining.expires_at > now()
+                      AND remaining.expires_at > clock_timestamp()
                   )
                 "#,
             )
-            .bind(id)
+            .bind(document_id)
             .execute(&mut *transaction)
             .await?;
             transaction.commit().await?;
@@ -1524,5 +1561,109 @@ mod cleanup_tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn automatic_report_expiry_updates_history_and_preserves_other_source_consumers() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        for (other_status, other_report, valid_input, preserve_source) in [
+            (None, false, false, false),
+            (Some("completed"), true, false, true),
+            (Some("queued"), false, false, true),
+            (Some("analyzing"), false, false, true),
+            (Some("cancel_requested"), false, false, true),
+            (Some("failed"), false, true, true),
+            (Some("failed"), false, false, false),
+        ] {
+            let user_id = Uuid::new_v4();
+            let profile_id = Uuid::new_v4();
+            let document_id = Uuid::new_v4();
+            let job_id = Uuid::new_v4();
+            let report_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')")
+                .bind(user_id).bind(format!("expiry-{user_id}"))
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
+                .bind(profile_id).bind(user_id).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO documents(id, user_id, original_name, media_type, document_format, size_bytes, storage_path, extracted_text, input_expires_at) VALUES($1,$2,'test.txt','text/plain','txt',6,$3,'正文',CASE WHEN $4 THEN now() + interval '1 hour' ELSE now() - interval '1 hour' END)")
+                .bind(document_id).bind(user_id).bind(format!("/tmp/{document_id}.txt")).bind(valid_input)
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO analysis_jobs(id, user_id, document_id, model_profile_id, status, stage, progress, analyzer_version, timeout_at) VALUES($1,$2,$3,$4,'completed','completed',100,'test',now() + interval '1 hour')")
+                .bind(job_id).bind(user_id).bind(document_id).bind(profile_id)
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO analysis_chunks(id, job_id, chunk_index, source_start, source_end, content, candidate_output, verifier_output) VALUES($1,$2,0,0,2,'正文','{}','{}')")
+                .bind(Uuid::new_v4()).bind(job_id).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO reports(id, job_id, user_id, document_name, content_json, markdown, expires_at) VALUES($1,$2,$3,'test.txt','{}','',now() - interval '1 minute')")
+                .bind(report_id).bind(job_id).bind(user_id).execute(&pool).await.unwrap();
+            sqlx::query("UPDATE analysis_jobs SET report_id = $2 WHERE id = $1")
+                .bind(job_id)
+                .bind(report_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            if let Some(status) = other_status {
+                let other_job_id = Uuid::new_v4();
+                sqlx::query("INSERT INTO analysis_jobs(id, user_id, document_id, model_profile_id, status, analyzer_version, timeout_at) VALUES($1,$2,$3,$4,$5,'test',now() + interval '1 hour')")
+                    .bind(other_job_id).bind(user_id).bind(document_id).bind(profile_id).bind(status)
+                    .execute(&pool).await.unwrap();
+                if other_report {
+                    sqlx::query("INSERT INTO reports(id, job_id, user_id, document_name, content_json, markdown, expires_at) VALUES($1,$2,$3,'other.txt','{}','',now() + interval '1 day')")
+                        .bind(Uuid::new_v4()).bind(other_job_id).bind(user_id)
+                        .execute(&pool).await.unwrap();
+                }
+            }
+            let target = CleanupTarget::Report {
+                id: report_id,
+                path: None,
+            };
+            confirm_cleanup_target(&pool, &target).await.unwrap();
+            // Repeated cleanup must be safe after the report is already gone.
+            confirm_cleanup_target(&pool, &target).await.unwrap();
+            let history: (String, String, i16, Option<Uuid>) = sqlx::query_as(
+                "SELECT status, stage, progress, report_id FROM analysis_jobs WHERE id = $1",
+            )
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                history,
+                ("expired".to_owned(), "expired".to_owned(), 100, None)
+            );
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reports WHERE id = $1)")
+                    .bind(report_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(!exists);
+            let source: Option<String> =
+                sqlx::query_scalar("SELECT extracted_text FROM documents WHERE id = $1")
+                    .bind(document_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                source.is_some(),
+                preserve_source,
+                "consumer: {other_status:?}"
+            );
+            let purged: bool = sqlx::query_scalar(
+                "SELECT content IS NULL AND candidate_output IS NULL AND verifier_output IS NULL FROM analysis_chunks WHERE job_id = $1",
+            ).bind(job_id).fetch_one(&pool).await.unwrap();
+            assert!(purged);
+            sqlx::query("DELETE FROM analysis_jobs WHERE user_id = $1")
+                .bind(user_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(user_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 }
