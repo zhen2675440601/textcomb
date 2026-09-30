@@ -732,6 +732,7 @@ export interface paths {
                         "application/json": components["schemas"]["ModelProfile"];
                     };
                 };
+                409: components["responses"]["Problem"];
             };
         };
         delete?: never;
@@ -778,6 +779,7 @@ export interface paths {
                     };
                 };
                 404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
             };
         };
         trace?: never;
