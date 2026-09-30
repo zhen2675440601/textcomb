@@ -265,8 +265,11 @@ fn locate_unique(
     if quote.trim().is_empty() {
         return None;
     }
+    // `match_indices` skips overlapping occurrences (for example, 哈哈 in 哈哈哈).
+    // Every character boundary must be checked before a quote can be called unique.
     let matches: Vec<usize> = text
-        .match_indices(quote)
+        .char_indices()
+        .filter(|(byte_index, _)| text[*byte_index..].starts_with(quote))
         .map(|(byte_index, _)| text[..byte_index].chars().count())
         .collect();
     if matches.len() == 1 {
@@ -673,6 +676,12 @@ mod tests {
             AnalysisProfile::Financial,
             IssueCategory::Typo
         ));
+    }
+
+    #[test]
+    fn overlapping_quotes_are_ambiguous_without_context() {
+        assert_eq!(locate_unique("哈哈哈", "哈哈", None, None), None);
+        assert_eq!(locate_unique("哈哈哈", "哈哈", None, Some("哈")), Some(0));
     }
 
     #[test]

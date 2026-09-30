@@ -313,6 +313,19 @@ pub async fn recover_expired_leases(pool: &PgPool) -> CoreResult<u64> {
     .execute(pool)
     .await?
     .rows_affected();
+    sqlx::query(
+        r#"
+        UPDATE analysis_chunks AS chunk
+        SET content = NULL, candidate_output = NULL, verifier_output = NULL,
+            updated_at = now()
+        FROM analysis_jobs AS job
+        WHERE chunk.job_id = job.id AND job.status = 'cancelled'
+          AND (chunk.content IS NOT NULL OR chunk.candidate_output IS NOT NULL
+               OR chunk.verifier_output IS NOT NULL)
+        "#,
+    )
+    .execute(pool)
+    .await?;
     Ok(recovered)
 }
 
@@ -1194,6 +1207,23 @@ pub async fn cleanup_expired(pool: &PgPool) -> CoreResult<Vec<CleanupTarget>> {
     )
     .execute(pool)
     .await?;
+    // Failed inputs have no report that justifies retaining the extracted body.
+    // A completed report still needs this body for source-position navigation.
+    sqlx::query(
+        r#"
+        UPDATE documents AS document
+        SET extracted_text = NULL
+        WHERE document.input_expires_at IS NOT NULL
+          AND document.input_expires_at < now()
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_jobs AS job
+              JOIN reports AS report ON report.job_id = job.id
+              WHERE job.document_id = document.id AND report.expires_at > now()
+          )
+        "#,
+    )
+    .execute(pool)
+    .await?;
     sqlx::query(
         r#"
         UPDATE documents AS document
@@ -1309,5 +1339,109 @@ mod tests {
         configuration.candidate_system_prompt = "已冻结的旧版提示".to_owned();
         assert!(!configuration.freeze_profile_guidance());
         assert_eq!(configuration.candidate_system_prompt, "已冻结的旧版提示");
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn expired_failed_input_drops_body_but_active_report_keeps_its_source() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let user_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4();
+        let failed_document = Uuid::new_v4();
+        let report_document = Uuid::new_v4();
+        let failed_job = Uuid::new_v4();
+        let completed_job = Uuid::new_v4();
+        let report_id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')",
+        )
+        .bind(user_id)
+        .bind(format!("cleanup-{user_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
+            .bind(profile_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for document_id in [failed_document, report_document] {
+            sqlx::query("INSERT INTO documents(id, user_id, original_name, media_type, document_format, size_bytes, storage_path, extracted_text, input_expires_at) VALUES($1,$2,'test.txt','text/plain','txt',4,$3,'正文',now() - interval '1 minute')")
+                .bind(document_id)
+                .bind(user_id)
+                .bind(format!("/tmp/{document_id}.txt"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (job_id, document_id, status) in [
+            (failed_job, failed_document, "failed"),
+            (completed_job, report_document, "completed"),
+        ] {
+            sqlx::query("INSERT INTO analysis_jobs(id, user_id, document_id, model_profile_id, status, analyzer_version, timeout_at) VALUES($1,$2,$3,$4,$5,'test',now() + interval '1 hour')")
+                .bind(job_id)
+                .bind(user_id)
+                .bind(document_id)
+                .bind(profile_id)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO reports(id, job_id, user_id, document_name, content_json, markdown, expires_at) VALUES($1,$2,$3,'test.txt','{}','',now() + interval '1 day')")
+            .bind(report_id)
+            .bind(completed_job)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let targets = cleanup_expired(&pool).await.unwrap();
+        for target in targets {
+            if let CleanupTarget::Document(path) = &target
+                && (path
+                    .to_string_lossy()
+                    .contains(&failed_document.to_string())
+                    || path
+                        .to_string_lossy()
+                        .contains(&report_document.to_string()))
+            {
+                confirm_cleanup_target(&pool, &target).await.unwrap();
+            }
+        }
+        let failed_body: Option<String> =
+            sqlx::query_scalar("SELECT extracted_text FROM documents WHERE id = $1")
+                .bind(failed_document)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let report_body: Option<String> =
+            sqlx::query_scalar("SELECT extracted_text FROM documents WHERE id = $1")
+                .bind(report_document)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(failed_body.is_none());
+        assert_eq!(report_body.as_deref(), Some("正文"));
+
+        sqlx::query("DELETE FROM analysis_jobs WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

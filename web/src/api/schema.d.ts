@@ -1119,6 +1119,18 @@ export interface components {
             status: string;
             total_chunks: number;
         };
+        AnalysisSnapshot: {
+            /** @enum {string} */
+            analysis_profile: "general" | "academic" | "financial";
+            analyzer_version: string;
+            candidate_model: string;
+            prompt_version: string;
+            provider_kind: string;
+            reference_profile: boolean;
+            /** @description 活动依据 ID 和修订号的 SHA-256 指纹；旧报告可能缺失 */
+            reference_version?: string;
+            verifier_model: string;
+        };
         CreateAnalysis: {
             /** @enum {string} */
             analysis_profile?: "general" | "academic" | "financial";
@@ -1225,16 +1237,7 @@ export interface components {
             text: string;
         };
         ReportV1: {
-            analysis: {
-                /** @enum {string} */
-                analysis_profile: "general" | "academic" | "financial";
-                analyzer_version: string;
-                candidate_model: string;
-                prompt_version: string;
-                provider_kind: string;
-                reference_profile: boolean;
-                verifier_model: string;
-            };
+            analysis: components["schemas"]["AnalysisSnapshot"];
             complete: boolean;
             document: Record<string, never>;
             /** Format: date-time */

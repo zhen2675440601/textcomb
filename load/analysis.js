@@ -72,4 +72,5 @@ export default function () {
       check(status, { "analysis completed": (response) => response.json("status") === "completed" });
     }
   }
+  check(terminal, { "analysis reached a terminal state": (value) => value === true });
 }
