@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Private security disclosure
+    url: https://github.com/zhen2675440601/textcomb/security/advisories/new
+    about: Do not post exploitable vulnerabilities or credentials in public issues.

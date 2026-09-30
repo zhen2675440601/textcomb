@@ -13,6 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -B -m unittest discover -s tools/release -p 'test_*.py'
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
