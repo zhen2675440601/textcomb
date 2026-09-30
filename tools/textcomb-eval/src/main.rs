@@ -29,6 +29,7 @@ struct Cli {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GoldDocument {
     document_id: String,
     issues: Vec<GoldIssue>,
@@ -111,32 +112,11 @@ fn main() -> Result<()> {
                 char_end: issue.location.char_end,
             })
             .collect();
-        let language_gold: Vec<_> = document
-            .issues
-            .iter()
-            .filter(|issue| issue.category != IssueCategory::Paragraph)
-            .cloned()
-            .collect();
-
-        accumulate(
-            &language_gold,
-            predictions.iter().filter(|issue| {
-                issue.level == IssueLevel::Confirmed && issue.category != IssueCategory::Paragraph
-            }),
+        accumulate_language(
+            &document.issues,
+            &predictions,
             &mut confirmed,
-        );
-        accumulate(
-            &language_gold,
-            predictions.iter().filter(|issue| {
-                issue.level == IssueLevel::Suspected && issue.category != IssueCategory::Paragraph
-            }),
             &mut suspected_only,
-        );
-        accumulate(
-            &language_gold,
-            predictions
-                .iter()
-                .filter(|issue| issue.category != IssueCategory::Paragraph),
             &mut combined,
         );
 
@@ -342,6 +322,41 @@ fn accumulate<'a>(
     accumulate_with_subtype_policy(gold, predictions, counts, true);
 }
 
+fn accumulate_language(
+    gold: &[GoldIssue],
+    predictions: &[Prediction],
+    confirmed: &mut Counts,
+    suspected: &mut Counts,
+    combined: &mut Counts,
+) {
+    let language_gold: Vec<_> = gold
+        .iter()
+        .filter(|issue| issue.category != IssueCategory::Paragraph)
+        .cloned()
+        .collect();
+    accumulate(
+        &language_gold,
+        predictions.iter().filter(|issue| {
+            issue.level == IssueLevel::Confirmed && issue.category != IssueCategory::Paragraph
+        }),
+        confirmed,
+    );
+    accumulate(
+        &language_gold,
+        predictions.iter().filter(|issue| {
+            issue.level == IssueLevel::Suspected && issue.category != IssueCategory::Paragraph
+        }),
+        suspected,
+    );
+    accumulate(
+        &language_gold,
+        predictions
+            .iter()
+            .filter(|issue| issue.category != IssueCategory::Paragraph),
+        combined,
+    );
+}
+
 fn accumulate_with_subtype_policy<'a>(
     gold: &[GoldIssue],
     predictions: impl Iterator<Item = &'a Prediction>,
@@ -460,6 +475,104 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotation_drafts_are_not_accepted_as_final_gold() {
+        assert!(
+            serde_json::from_str::<GoldDocument>(
+                r#"{"document_id":"draft","issues":[],"review_status":"not_started"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn correct_and_false_paragraph_suggestions_do_not_change_language_metrics() {
+        let gold = [
+            GoldIssue {
+                category: IssueCategory::Typo,
+                grammar_subtype: None,
+                char_start: 0,
+                char_end: 1,
+            },
+            GoldIssue {
+                category: IssueCategory::Grammar,
+                grammar_subtype: Some(GrammarSubtype::Collocation),
+                char_start: 1,
+                char_end: 2,
+            },
+            GoldIssue {
+                category: IssueCategory::Paragraph,
+                grammar_subtype: None,
+                char_start: 2,
+                char_end: 3,
+            },
+        ];
+        let predictions = [
+            Prediction {
+                category: IssueCategory::Typo,
+                grammar_subtype: None,
+                level: IssueLevel::Confirmed,
+                char_start: 0,
+                char_end: 1,
+            },
+            Prediction {
+                category: IssueCategory::Grammar,
+                grammar_subtype: Some(GrammarSubtype::Collocation),
+                level: IssueLevel::Suspected,
+                char_start: 1,
+                char_end: 2,
+            },
+            Prediction {
+                category: IssueCategory::Paragraph,
+                grammar_subtype: None,
+                level: IssueLevel::Suspected,
+                char_start: 2,
+                char_end: 3,
+            },
+            Prediction {
+                category: IssueCategory::Paragraph,
+                grammar_subtype: None,
+                level: IssueLevel::Suspected,
+                char_start: 3,
+                char_end: 4,
+            },
+        ];
+        let mut confirmed = Counts::default();
+        let mut suspected = Counts::default();
+        let mut combined = Counts::default();
+        accumulate_language(
+            &gold,
+            &predictions,
+            &mut confirmed,
+            &mut suspected,
+            &mut combined,
+        );
+        assert_eq!(
+            (
+                confirmed.true_positive,
+                confirmed.false_positive,
+                confirmed.false_negative
+            ),
+            (1, 0, 1)
+        );
+        assert_eq!(
+            (
+                suspected.true_positive,
+                suspected.false_positive,
+                suspected.false_negative
+            ),
+            (1, 0, 1)
+        );
+        assert_eq!(
+            (
+                combined.true_positive,
+                combined.false_positive,
+                combined.false_negative
+            ),
+            (2, 0, 0)
+        );
+    }
 
     #[test]
     fn document_ids_cannot_escape_prediction_directory() {
