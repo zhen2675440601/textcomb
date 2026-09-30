@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api, ApiProblem } from "@/api/client";
+import { formatSourceLocation } from "@/utils/source-location";
 import type {
   FeedbackVerdict,
   Issue,
@@ -271,27 +272,7 @@ watch([sourceOpen, source, selectedIssueId], () => {
 });
 
 function locationLabel(issue: Issue) {
-  const location = issue.location;
-  if (location.page) {
-    const lines =
-      location.line_start && location.line_end
-        ? `，第 ${location.line_start}–${location.line_end} 行`
-        : "";
-    return `第 ${location.page} 页${lines}`;
-  }
-  if (location.line_start) {
-    return location.line_end && location.line_end !== location.line_start
-      ? `第 ${location.line_start}–${location.line_end} 行`
-      : `第 ${location.line_start} 行`;
-  }
-  if (location.paragraph_index !== undefined) {
-    const sentence =
-      location.sentence_index !== undefined
-        ? `，第 ${location.sentence_index + 1} 句`
-        : "";
-    return `第 ${location.paragraph_index + 1} 段${sentence}`;
-  }
-  return `字符 ${location.char_start}–${location.char_end}`;
+  return formatSourceLocation(issue.location);
 }
 
 async function setFeedback(issue: Issue, verdict: FeedbackVerdict) {

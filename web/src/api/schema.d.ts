@@ -1184,7 +1184,7 @@ export interface components {
             id: string;
             /** @enum {string} */
             level: "confirmed" | "suspected";
-            location: Record<string, never>;
+            location: components["schemas"]["SourceLocation"];
             original_text: string;
             reason: string;
             suggestion: string;
@@ -1251,6 +1251,20 @@ export interface components {
             /** @constant */
             schema: "textcomb.report.v1";
             summary: Record<string, never>;
+        };
+        SourceLocation: {
+            char_end: number;
+            char_start: number;
+            /** @enum {string} */
+            document_format: "txt" | "docx" | "pdf";
+            line_end?: number;
+            line_start?: number;
+            page?: number;
+            /** @description 跨页片段的结束页；旧报告可能缺失 */
+            page_end?: number;
+            paragraph_index?: number;
+            quote: string;
+            sentence_index?: number;
         };
         UpdateModelProfile: {
             /**

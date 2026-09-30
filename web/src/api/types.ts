@@ -1,3 +1,5 @@
+import type { components } from "./schema";
+
 export type UserRole = "user" | "super_admin";
 
 export interface User {
@@ -101,17 +103,7 @@ export interface ReportSource {
   text: string;
 }
 
-export interface SourceLocation {
-  document_format: DocumentFormat;
-  page?: number;
-  line_start?: number;
-  line_end?: number;
-  paragraph_index?: number;
-  sentence_index?: number;
-  char_start: number;
-  char_end: number;
-  quote: string;
-}
+export type SourceLocation = components["schemas"]["SourceLocation"];
 
 export interface EvidenceReference {
   source_id: string;

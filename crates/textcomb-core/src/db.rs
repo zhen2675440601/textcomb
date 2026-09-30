@@ -15,6 +15,9 @@ use textcomb_domain::{EvidenceRef, Issue, ReportV1};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+#[cfg(test)]
+mod lifecycle_tests;
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ClaimedJob {
     pub id: Uuid,
@@ -941,6 +944,36 @@ async fn save_report_in_transaction(
     pdf_path: Option<&str>,
     expires_at: OffsetDateTime,
 ) -> CoreResult<()> {
+    // Lock before inserting a report or clearing inputs. A lease takeover must
+    // either finish before this transaction or wait until the report commits.
+    let job: Option<(Option<String>, String)> = sqlx::query_as(
+        "SELECT worker_id, status FROM analysis_jobs WHERE id = $1 AND user_id = $2 FOR UPDATE",
+    )
+    .bind(report.job_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((owner, status)) = job else {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务归属已失效"));
+    };
+    if owner.as_deref() != Some(worker_id) {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务归属已失效"));
+    }
+    if matches!(status.as_str(), "cancel_requested" | "cancelled") {
+        return Err(CoreError::public(
+            ErrorCode::JobCancelled,
+            "任务已由用户取消",
+        ));
+    }
+    if !matches!(
+        status.as_str(),
+        "analyzing" | "verifying" | "merging" | "rendering"
+    ) {
+        return Err(CoreError::public(
+            ErrorCode::Conflict,
+            "任务已不允许生成报告",
+        ));
+    }
     let content_json = serde_json::to_value(report)?;
     sqlx::query(
         r#"
@@ -1007,10 +1040,7 @@ async fn save_report_in_transaction(
     .execute(&mut **transaction)
     .await?;
     if completed.rows_affected() != 1 {
-        return Err(CoreError::public(
-            ErrorCode::JobCancelled,
-            "任务已由用户取消",
-        ));
+        return Err(CoreError::public(ErrorCode::Conflict, "任务归属已失效"));
     }
     Ok(())
 }
@@ -1087,11 +1117,15 @@ pub async fn mark_failed(
     Ok(())
 }
 
-pub async fn finalize_cancelled(pool: &PgPool, job_id: Uuid) -> CoreResult<Option<PathBuf>> {
+pub async fn finalize_cancelled(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+) -> CoreResult<Option<PathBuf>> {
     let mut transaction = pool.begin().await?;
-    let storage_path: Option<String> = sqlx::query_scalar(
+    let job: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT document.storage_path
+        SELECT job.worker_id, job.status, document.storage_path
         FROM analysis_jobs AS job
         JOIN documents AS document ON document.id = job.document_id
         WHERE job.id = $1
@@ -1099,18 +1133,30 @@ pub async fn finalize_cancelled(pool: &PgPool, job_id: Uuid) -> CoreResult<Optio
         "#,
     )
     .bind(job_id)
-    .fetch_one(&mut *transaction)
+    .fetch_optional(&mut *transaction)
     .await?;
+    let Some((owner, status, storage_path)) = job else {
+        return Err(CoreError::public(ErrorCode::Conflict, "任务归属已失效"));
+    };
+    if owner.as_deref() != Some(worker_id)
+        || !matches!(status.as_str(), "cancel_requested" | "cancelled")
+    {
+        return Err(CoreError::public(
+            ErrorCode::Conflict,
+            "任务不允许由该 Worker 取消",
+        ));
+    }
     sqlx::query(
         r#"
         UPDATE analysis_jobs
         SET status = 'cancelled', stage = 'cancelled', lease_until = NULL,
             completed_at = now(), error_code = 'JOB_CANCELLED',
             error_message = '任务已由用户取消', model_snapshot = NULL
-        WHERE id = $1
+        WHERE id = $1 AND worker_id = $2 AND status IN ('cancel_requested', 'cancelled')
         "#,
     )
     .bind(job_id)
+    .bind(worker_id)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
