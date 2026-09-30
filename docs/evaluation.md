@@ -28,7 +28,9 @@ cargo run -p textcomb-eval -- \
   --output evaluation-summary.json
 ```
 
-评测输出版本为 `textcomb.evaluation.v2`。病句 Gold 必须填写 `grammar_subtype`，其他类别不得填写。严格匹配要求类别相同、病句子类相同，且交集至少覆盖 Gold 与预测范围各自的一半；仍采用一对一匹配，重复预测计作误报。另输出忽略病句子类的 `grammar_detection`，用于区分“发现病句”与“子类判对”，以及 `combined_by_grammar_subtype`。旧 Gold 文件需要补充子类后再使用新版评测程序；不能将 v1 与 v2 的分数直接比较。
+评测输出版本为 `textcomb.evaluation.v3`。病句 Gold 必须填写 `grammar_subtype`，其他类别不得填写。严格匹配要求类别相同、病句子类相同，且交集至少覆盖 Gold 与预测范围各自的一半；采用最大数量的一对一匹配，重复预测计作误报，避免按交集大小贪心分配造成漏配。另输出忽略病句子类的 `grammar_detection`，用于区分“发现病句”与“子类判对”，以及 `combined_by_grammar_subtype`。v3 的正式、疑似及合并总体指标只计算错字、标点和病句；分段建议仅出现在 `combined_by_category.paragraph`。v1、v2、v3 的分数不能直接横向比较。
+
+每个 Gold 文档必须提供完整报告。缺失、错误 schema、不完整报告、重复使用的报告/任务 ID、无效范围和越界位置会使评测失败，不能把失败任务当作正常的零问题报告。`document_id` 仅允许 1 至 128 个 ASCII 字母、数字、下划线或连字符，不允许路径。报告统计必须与问题列表一致；Gold 的位置也不能超过报告正文字符数。程序只验证定位和分类，不自动确认文章授权、双人独立标注、正文哈希、模型版本锁定或建议质量；这些由[私有评测准备与验收流程](evaluation-preparation.md)记录并人工审阅。
 
 发布门槛：
 
