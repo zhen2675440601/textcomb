@@ -118,7 +118,11 @@ async fn specification() -> Json<Value> {
                 "delete": {
                     "tags": ["documents"],
                     "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
-                    "responses": { "204": { "description": "已删除" } }
+                    "responses": {
+                        "204": { "description": "已删除" },
+                        "404": { "$ref": "#/components/responses/Problem" },
+                        "409": { "description": "相关任务尚未取消完成或关联状态变化，请刷新后重试", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+                    }
                 }
             },
             "/analyses": {
@@ -164,7 +168,11 @@ async fn specification() -> Json<Value> {
                 "delete": {
                     "tags": ["analyses"],
                     "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
-                    "responses": { "204": { "description": "任务和报告已删除" } }
+                    "responses": {
+                        "204": { "description": "任务和报告已删除" },
+                        "404": { "$ref": "#/components/responses/Problem" },
+                        "409": { "description": "相关任务尚未取消完成或关联状态变化，请刷新后重试", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+                    }
                 }
             },
             "/analyses/{id}/events": {
@@ -215,7 +223,11 @@ async fn specification() -> Json<Value> {
                 "delete": {
                     "tags": ["reports"],
                     "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
-                    "responses": { "204": { "description": "已删除" } }
+                    "responses": {
+                        "204": { "description": "已删除" },
+                        "404": { "$ref": "#/components/responses/Problem" },
+                        "409": { "description": "相关任务尚未取消完成或关联状态变化，请刷新后重试", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+                    }
                 }
             },
             "/reports/{id}/source": {
@@ -342,7 +354,7 @@ async fn specification() -> Json<Value> {
                 "post": {
                     "tags": ["models"],
                     "parameters": [{ "$ref": "#/components/parameters/UuidId" }],
-                    "responses": { "200": { "description": "模型连接测试结果" } }
+                    "responses": { "200": { "description": "初检与复核模型均连接成功；相同模型名只测试一次" } }
                 }
             },
             "/model-profiles/{id}": {

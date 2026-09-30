@@ -7,6 +7,7 @@ struct Fixture {
     user_id: Uuid,
     job_id: Uuid,
     document_id: Uuid,
+    profile_id: Uuid,
 }
 
 impl Fixture {
@@ -15,8 +16,9 @@ impl Fixture {
             user_id: Uuid::new_v4(),
             job_id: Uuid::new_v4(),
             document_id: Uuid::new_v4(),
+            profile_id: Uuid::new_v4(),
         };
-        let profile_id = Uuid::new_v4();
+        let profile_id = fixture.profile_id;
         sqlx::query(
             "INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')",
         )
@@ -88,6 +90,165 @@ impl Fixture {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn queued_deadlines_expire_without_claiming_or_model_usage() {
+    let Ok(url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+        return;
+    };
+    let pool = PgPool::connect(&url).await.unwrap();
+    let expired = Fixture::create(&pool).await;
+    sqlx::query("UPDATE analysis_jobs SET status = 'queued', worker_id = NULL, lease_until = NULL, timeout_at = now() - interval '1 second' WHERE id = $1")
+        .bind(expired.job_id).execute(&pool).await.unwrap();
+    assert!(claim_job(&pool, "queue-worker").await.unwrap().is_none());
+    let row: (String, Option<String>, i32, Option<OffsetDateTime>) = sqlx::query_as(
+        "SELECT status, error_code, attempt_count, started_at FROM analysis_jobs WHERE id = $1",
+    )
+    .bind(expired.job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        ("failed".to_owned(), Some("JOB_TIMEOUT".to_owned()), 0, None)
+    );
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM model_usage WHERE job_id = $1")
+        .bind(expired.job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(calls, 0);
+
+    let waiting = Fixture::create(&pool).await;
+    sqlx::query("UPDATE analysis_jobs SET status = 'queued', worker_id = NULL, lease_until = NULL, timeout_at = now() + interval '1 hour' WHERE id = $1")
+        .bind(waiting.job_id).execute(&pool).await.unwrap();
+    let claimed = claim_job(&pool, "queue-worker").await.unwrap().unwrap();
+    assert_eq!(claimed.id, waiting.job_id);
+    assert!(claimed.timeout_at > OffsetDateTime::now_utc());
+    expired.cleanup(&pool).await;
+    waiting.cleanup(&pool).await;
+}
+
+#[tokio::test]
+async fn cached_model_limit_follows_live_updates_and_drains_existing_calls() {
+    use crate::model_limits::ProfileLimit;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    let Ok(url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+        return;
+    };
+    let pool = PgPool::connect(&url).await.unwrap();
+    let fixture = Fixture::create(&pool).await;
+    sqlx::query("UPDATE model_profiles SET max_concurrency = 2 WHERE id = $1")
+        .bind(fixture.profile_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let gate = Arc::new(ProfileLimit::new(
+        pool.clone(),
+        fixture.profile_id,
+        fixture.user_id,
+    ));
+    let stop = CancellationToken::new();
+    let first = gate.acquire(&stop).await.unwrap();
+    let second = gate.acquire(&stop).await.unwrap();
+    sqlx::query("UPDATE model_profiles SET max_concurrency = 1 WHERE id = $1")
+        .bind(fixture.profile_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), gate.acquire(&stop))
+            .await
+            .is_err()
+    );
+    drop(second);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), gate.acquire(&stop))
+            .await
+            .is_err()
+    );
+    drop(first);
+    let only = gate.acquire(&stop).await.unwrap();
+    // A waiter already blocked on the cached gate must notice an increase.
+    let waiting = gate.acquire(&stop);
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE model_profiles SET max_concurrency = 2 WHERE id = $1")
+        .bind(fixture.profile_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(3), &mut waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    stop.cancel();
+    assert_eq!(
+        gate.acquire(&stop).await.err().unwrap().code(),
+        ErrorCode::Conflict
+    );
+    drop(next);
+    drop(only);
+    fixture.cleanup(&pool).await;
+}
+
+#[tokio::test]
+async fn model_limit_rechecks_decreases_after_waiting_for_a_global_slot() {
+    use crate::model_limits::ProfileLimit;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+    use tokio_util::sync::CancellationToken;
+    let Ok(url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+        return;
+    };
+    let pool = PgPool::connect(&url).await.unwrap();
+    let fixture = Fixture::create(&pool).await;
+    sqlx::query("UPDATE model_profiles SET max_concurrency = 2 WHERE id = $1")
+        .bind(fixture.profile_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let gate = Arc::new(ProfileLimit::new(
+        pool.clone(),
+        fixture.profile_id,
+        fixture.user_id,
+    ));
+    let global = Arc::new(Semaphore::new(0));
+    let stop = CancellationToken::new();
+    let in_flight = gate.acquire(&stop).await.unwrap();
+    let pending = gate.acquire_for_call(&global, &stop);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut pending)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE model_profiles SET max_concurrency = 1 WHERE id = $1")
+        .bind(fixture.profile_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    global.add_permits(1);
+    // Opening the global slot must not bypass the lowered profile limit.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut pending)
+            .await
+            .is_err()
+    );
+    assert_eq!(global.available_permits(), 1);
+    drop(in_flight);
+    let permits = tokio::time::timeout(Duration::from_secs(3), &mut pending)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(permits);
+    fixture.cleanup(&pool).await;
 }
 
 #[tokio::test]

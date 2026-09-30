@@ -1,6 +1,7 @@
 mod admin;
 mod analyses;
 mod auth;
+mod deletion;
 mod documents;
 mod models;
 mod reports;

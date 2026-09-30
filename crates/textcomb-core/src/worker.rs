@@ -4,6 +4,7 @@ use crate::{
     crypto::decrypt_secret,
     db, documents,
     error::{CoreError, CoreResult, ErrorCode},
+    model_limits::ProfileLimit,
     prompts,
     provider::{
         AnalysisProvider, CandidateIssue, ProviderKind, ProviderProfile, VerifiedCandidate,
@@ -36,7 +37,7 @@ pub struct Worker {
     config: Arc<AppConfig>,
     storage: LocalStorage,
     model_semaphore: Arc<Semaphore>,
-    profile_semaphores: Arc<Mutex<HashMap<Uuid, Arc<Semaphore>>>>,
+    profile_limits: Arc<Mutex<HashMap<Uuid, Arc<ProfileLimit>>>>,
 }
 
 impl Worker {
@@ -48,7 +49,7 @@ impl Worker {
             config,
             storage,
             model_semaphore,
-            profile_semaphores: Arc::new(Mutex::new(HashMap::new())),
+            profile_limits: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -107,6 +108,14 @@ impl Worker {
     }
 
     async fn process_claimed(&self, job: db::ClaimedJob, worker_id: &str) {
+        let remaining = remaining_job_time(job.timeout_at, OffsetDateTime::now_utc());
+        if remaining.is_zero() {
+            let error = CoreError::public(ErrorCode::JobTimeout, "任务已超过截止时间，请重试");
+            if let Err(error) = db::mark_failed(&self.pool, job.id, worker_id, &error).await {
+                error!(job_id = %job.id, error = %error, "failed to mark expired claim");
+            }
+            return;
+        }
         let heartbeat_cancel = CancellationToken::new();
         let stop_token = CancellationToken::new();
         let lease_lost = CancellationToken::new();
@@ -161,7 +170,7 @@ impl Worker {
             })
         };
         let result = time::timeout(
-            self.config.job_timeout,
+            remaining,
             self.process_job(&job, worker_id, stop_token.clone()),
         )
         .await;
@@ -303,15 +312,15 @@ impl Worker {
             },
         )?;
         let evidence_ids: Arc<Vec<String>> = Arc::new(evidence.keys().cloned().collect());
-        let profile_semaphore = {
-            let mut semaphores = self.profile_semaphores.lock().await;
-            semaphores
+        let profile_limit = {
+            let mut limits = self.profile_limits.lock().await;
+            limits
                 .entry(job.model_profile_id)
                 .or_insert_with(|| {
-                    Arc::new(Semaphore::new(
-                        usize::try_from(job_configuration.max_concurrency)
-                            .unwrap_or(1)
-                            .clamp(1, 100),
+                    Arc::new(ProfileLimit::new(
+                        self.pool.clone(),
+                        job.model_profile_id,
+                        job.user_id,
                     ))
                 })
                 .clone()
@@ -382,7 +391,7 @@ impl Worker {
             let evidence_ids = evidence_ids.clone();
             let pool = self.pool.clone();
             let semaphore = self.model_semaphore.clone();
-            let profile_semaphore = profile_semaphore.clone();
+            let profile_limit = profile_limit.clone();
             let candidate_model = job_configuration.candidate_model.clone();
             let verifier_model = job_configuration.verifier_model.clone();
             let provider_kind = job_configuration.provider_kind.clone();
@@ -399,7 +408,7 @@ impl Worker {
                     chunk,
                     provider,
                     semaphore,
-                    profile_semaphore,
+                    profile_limit,
                     extracted,
                     evidence,
                     evidence_ids,
@@ -605,6 +614,12 @@ impl Worker {
     }
 }
 
+fn remaining_job_time(deadline: OffsetDateTime, now: OffsetDateTime) -> Duration {
+    // Queue waiting is already part of timeout_at. Never restart the deadline
+    // when a job is claimed or recovered by another Worker.
+    Duration::try_from(deadline - now).unwrap_or(Duration::ZERO)
+}
+
 fn reference_version(evidence: &HashMap<String, EvidenceRef>) -> String {
     let mut entries: Vec<_> = evidence.values().collect();
     entries.sort_by(|left, right| left.source_id.cmp(&right.source_id));
@@ -625,7 +640,7 @@ async fn analyze_chunk(
     chunk: AnalysisChunk,
     provider: Arc<dyn AnalysisProvider>,
     semaphore: Arc<Semaphore>,
-    profile_semaphore: Arc<Semaphore>,
+    profile_limit: Arc<ProfileLimit>,
     extracted: Arc<documents::ExtractedDocument>,
     evidence: Arc<std::collections::HashMap<String, EvidenceRef>>,
     evidence_ids: Arc<Vec<String>>,
@@ -639,12 +654,9 @@ async fn analyze_chunk(
     worker_id: &str,
 ) -> CoreResult<Vec<Issue>> {
     let candidate_result = {
-        let _profile_permit = profile_semaphore.acquire().await.map_err(|_| {
-            CoreError::public(ErrorCode::ProviderUnavailable, "模型配置并发控制器已关闭")
-        })?;
-        let _permit = semaphore.acquire().await.map_err(|_| {
-            CoreError::public(ErrorCode::ProviderUnavailable, "模型并发控制器已关闭")
-        })?;
+        let (_profile_permit, _permit) = profile_limit
+            .acquire_for_call(&semaphore, &stop_token)
+            .await?;
         ensure_not_cancelled(pool, job_id, &stop_token).await?;
         let result = tokio::select! {
             _ = stop_token.cancelled() => {
@@ -736,12 +748,9 @@ async fn analyze_chunk(
         .collect::<CoreResult<Vec<_>>>()?;
     db::mark_chunk_verifying(pool, job_id, worker_id, chunk.index).await?;
     let verification_result = {
-        let _profile_permit = profile_semaphore.acquire().await.map_err(|_| {
-            CoreError::public(ErrorCode::ProviderUnavailable, "模型配置并发控制器已关闭")
-        })?;
-        let _permit = semaphore.acquire().await.map_err(|_| {
-            CoreError::public(ErrorCode::ProviderUnavailable, "模型并发控制器已关闭")
-        })?;
+        let (_profile_permit, _permit) = profile_limit
+            .acquire_for_call(&semaphore, &stop_token)
+            .await?;
         ensure_not_cancelled(pool, job_id, &stop_token).await?;
         let result = tokio::select! {
             _ = stop_token.cancelled() => {
@@ -867,6 +876,19 @@ async fn ensure_not_cancelled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claimed_jobs_use_the_remaining_absolute_deadline() {
+        let now = OffsetDateTime::UNIX_EPOCH;
+        assert_eq!(
+            remaining_job_time(now + ::time::Duration::seconds(30), now),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            remaining_job_time(now - ::time::Duration::seconds(1), now),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn reference_badge_is_limited_to_the_evaluated_scope() {

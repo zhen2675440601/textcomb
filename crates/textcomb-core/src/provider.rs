@@ -406,21 +406,35 @@ impl AnalysisProvider for JsonProtocolProvider {
     }
 
     async fn test_connection(&self) -> CoreResult<()> {
+        self.test_model_connection(&self.profile.candidate_model, "初检")
+            .await?;
+        if self.profile.verifier_model != self.profile.candidate_model {
+            self.test_model_connection(&self.profile.verifier_model, "复核")
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+impl JsonProtocolProvider {
+    async fn test_model_connection(&self, model: &str, phase: &str) -> CoreResult<()> {
         #[derive(Deserialize)]
         struct TestResponse {
             ok: bool,
         }
         let result: ProviderResult<TestResponse> = self
-            .call(
-                &self.profile.candidate_model,
-                "只返回 JSON 对象。",
-                r#"返回 {"ok": true}"#,
-            )
-            .await?;
+            .call(model, "只返回 JSON 对象。", r#"返回 {"ok": true}"#)
+            .await
+            .map_err(|error| {
+                CoreError::public(
+                    error.code(),
+                    format!("{phase}模型连接测试失败：{}", error.safe_message()),
+                )
+            })?;
         if !result.value.ok {
             return Err(CoreError::public(
                 ErrorCode::ProviderUnavailable,
-                "模型连接测试没有返回预期结果",
+                format!("{phase}模型连接测试没有返回预期结果"),
             ));
         }
         Ok(())
@@ -808,6 +822,75 @@ struct AnthropicUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ModelTestService {
+        base_url: String,
+        models: Arc<tokio::sync::Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for ModelTestService {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl ModelTestService {
+        async fn start() -> Self {
+            use axum::{Json, Router, extract::State, routing::post};
+            let models = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+            let app = Router::new().route("/v1/chat/completions", post(
+                |State(models): State<Arc<tokio::sync::Mutex<Vec<String>>>>, Json(body): Json<Value>| async move {
+                    let model = body["model"].as_str().unwrap().to_owned();
+                    models.lock().await.push(model.clone());
+                    if model == "broken" {
+                        (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": "unavailable model"})))
+                    } else {
+                        (axum::http::StatusCode::OK, Json(json!({"choices": [{"message": {"content": "{\"ok\":true}"}}]})))
+                    }
+                }
+            )).with_state(models.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            Self {
+                base_url,
+                models,
+                task,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_test_checks_both_models_and_reports_failing_phase() {
+        for (candidate, verifier, phase, expected) in [
+            ("candidate", "verifier", None, vec!["candidate", "verifier"]),
+            (
+                "candidate",
+                "broken",
+                Some("复核"),
+                vec!["candidate", "broken"],
+            ),
+            ("broken", "verifier", Some("初检"), vec!["broken"]),
+            ("same", "same", None, vec!["same"]),
+        ] {
+            let service = ModelTestService::start().await;
+            let mut profile = sample_profile();
+            profile.base_url = service.base_url.clone();
+            profile.candidate_model = candidate.to_owned();
+            profile.verifier_model = verifier.to_owned();
+            let provider =
+                JsonProtocolProvider::new(ProviderKind::OpenAiCompatible, profile).unwrap();
+            let result = provider.test_connection().await;
+            match phase {
+                Some(phase) => assert!(result.unwrap_err().safe_message().contains(phase)),
+                None => result.unwrap(),
+            }
+            assert_eq!(*service.models.lock().await, expected);
+        }
+    }
 
     fn sample_profile() -> ProviderProfile {
         ProviderProfile {

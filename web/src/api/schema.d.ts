@@ -266,6 +266,16 @@ export interface paths {
                     };
                     content?: never;
                 };
+                404: components["responses"]["Problem"];
+                /** @description 相关任务尚未取消完成或关联状态变化，请刷新后重试 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
             };
         };
         options?: never;
@@ -585,6 +595,16 @@ export interface paths {
                     };
                     content?: never;
                 };
+                404: components["responses"]["Problem"];
+                /** @description 相关任务尚未取消完成或关联状态变化，请刷新后重试 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
             };
         };
         options?: never;
@@ -817,7 +837,7 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description 模型连接测试结果 */
+                /** @description 初检与复核模型均连接成功；相同模型名只测试一次 */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -880,6 +900,16 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content?: never;
+                };
+                404: components["responses"]["Problem"];
+                /** @description 相关任务尚未取消完成或关联状态变化，请刷新后重试 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
                 };
             };
         };
