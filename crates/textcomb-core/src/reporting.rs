@@ -8,7 +8,10 @@ use tokio::{fs, process::Command, time};
 pub fn to_markdown(report: &ReportV1) -> String {
     let mut output = String::new();
     output.push_str("# 文梳问题报告\n\n");
-    output.push_str(&format!("- 文件：{}\n", report.document.original_name));
+    output.push_str(&format!(
+        "- 文件：{}\n",
+        markdown_text(&report.document.original_name)
+    ));
     output.push_str(&format!("- 正文字数：{}\n", report.document.char_count));
     output.push_str(&format!(
         "- 分析场景：{}\n",
@@ -16,19 +19,26 @@ pub fn to_markdown(report: &ReportV1) -> String {
     ));
     output.push_str(&format!("- 正式问题：{}\n", report.summary.confirmed));
     output.push_str(&format!("- 疑似问题：{}\n", report.summary.suspected));
-    output.push_str(&format!("- 模型接口：{}\n", report.analysis.provider_kind));
+    output.push_str(&format!(
+        "- 模型接口：{}\n",
+        markdown_text(&report.analysis.provider_kind)
+    ));
     output.push_str(&format!(
         "- 模型：{} / {}\n",
-        report.analysis.candidate_model, report.analysis.verifier_model
+        markdown_text(&report.analysis.candidate_model),
+        markdown_text(&report.analysis.verifier_model)
     ));
     output.push_str(&format!(
         "- 提示词版本：{}\n",
-        report.analysis.prompt_version
+        markdown_text(&report.analysis.prompt_version)
     ));
-    output.push_str(&format!("- 依据库版本：{}\n", reference_label(report)));
+    output.push_str(&format!(
+        "- 依据库版本：{}\n",
+        markdown_text(reference_label(report))
+    ));
     output.push_str(&format!(
         "- 分析器版本：{}\n",
-        report.analysis.analyzer_version
+        markdown_text(&report.analysis.analyzer_version)
     ));
     output.push_str(&format!("- 模型配置：{}\n\n", profile_label(report)));
     if report.issues.is_empty() {
@@ -42,9 +52,12 @@ pub fn to_markdown(report: &ReportV1) -> String {
             level_label(issue.level)
         ));
         output.push_str(&format!("- 位置：{}\n", location_label(&issue.location)));
-        output.push_str(&format!("- 原文：{}\n", issue.original_text));
-        output.push_str(&format!("- 原因：{}\n", issue.reason));
-        output.push_str(&format!("- 建议：{}\n", issue.suggestion));
+        output.push_str(&format!(
+            "- 原文：{}\n",
+            markdown_text(&issue.original_text)
+        ));
+        output.push_str(&format!("- 原因：{}\n", markdown_text(&issue.reason)));
+        output.push_str(&format!("- 建议：{}\n", markdown_text(&issue.suggestion)));
         output.push_str(&format!("- 置信度：{}%\n", issue.confidence));
         if let Some(feedback) = issue.feedback {
             output.push_str(&format!("- 作者审核：{}\n", feedback_label(feedback)));
@@ -53,8 +66,10 @@ pub fn to_markdown(report: &ReportV1) -> String {
             output.push_str("- 参考资料（具体条款未核对）：\n");
             for evidence in &issue.evidence_refs {
                 output.push_str(&format!(
-                    "  - [{} {}]({})\n",
-                    evidence.title, evidence.revision, evidence.source_url
+                    "  - [{} {}](<{}>)\n",
+                    markdown_text(&evidence.title),
+                    markdown_text(&evidence.revision),
+                    markdown_url(&evidence.source_url)
                 ));
             }
         }
@@ -68,8 +83,8 @@ pub fn to_markdown(report: &ReportV1) -> String {
                 miss.category.as_str(),
                 miss.char_start,
                 miss.char_end,
-                miss.quote,
-                miss.note
+                markdown_text(&miss.quote),
+                markdown_text(&miss.note)
             ));
         }
         output.push('\n');
@@ -91,20 +106,20 @@ pub fn to_typst(report: &ReportV1) -> String {
     );
     output.push_str(&format!(
         "#table(columns: (80pt, 1fr), [文件], [{}], [正文字数], [{}], [分析场景], [{}], [正式问题], [{}], [疑似问题], [{}])\n\n",
-        typst_escape(&report.document.original_name),
+        typst_text(&report.document.original_name),
         report.document.char_count,
-        typst_escape(analysis_profile_label(report.analysis.analysis_profile)),
+        typst_text(analysis_profile_label(report.analysis.analysis_profile)),
         report.summary.confirmed,
         report.summary.suspected
     ));
     output.push_str(&format!(
         "- *模型接口：* {}\n- *模型：* {} / {}\n- *提示词版本：* {}\n- *依据库版本：* {}\n- *分析器版本：* {}\n- *模型配置：* {}\n\n",
-        typst_escape(&report.analysis.provider_kind),
-        typst_escape(&report.analysis.candidate_model),
-        typst_escape(&report.analysis.verifier_model),
-        typst_escape(&report.analysis.prompt_version),
-        typst_escape(reference_label(report)),
-        typst_escape(&report.analysis.analyzer_version),
+        typst_text(&report.analysis.provider_kind),
+        typst_text(&report.analysis.candidate_model),
+        typst_text(&report.analysis.verifier_model),
+        typst_text(&report.analysis.prompt_version),
+        typst_text(reference_label(report)),
+        typst_text(&report.analysis.analyzer_version),
         profile_label(report),
     ));
     for (index, issue) in report.issues.iter().enumerate() {
@@ -116,10 +131,10 @@ pub fn to_typst(report: &ReportV1) -> String {
         ));
         output.push_str(&format!(
             "- *位置：* {}\n- *原文：* #quote[{}]\n- *原因：* {}\n- *建议：* {}\n- *置信度：* {}%\n",
-            typst_escape(&location_label(&issue.location)),
-            typst_escape(&issue.original_text),
-            typst_escape(&issue.reason),
-            typst_escape(&issue.suggestion),
+            typst_text(&location_label(&issue.location)),
+            typst_text(&issue.original_text),
+            typst_text(&issue.reason),
+            typst_text(&issue.suggestion),
             issue.confidence
         ));
         if let Some(feedback) = issue.feedback {
@@ -129,10 +144,10 @@ pub fn to_typst(report: &ReportV1) -> String {
             output.push_str("- *参考资料（具体条款未核对）：*\n");
             for evidence in &issue.evidence_refs {
                 output.push_str(&format!(
-                    "  - #link(\"{}\")[{} {}]\n",
-                    typst_escape(&evidence.source_url),
-                    typst_escape(&evidence.title),
-                    typst_escape(&evidence.revision)
+                    "  - #link({})[{} {}]\n",
+                    typst_string(&evidence.source_url),
+                    typst_text(&evidence.title),
+                    typst_text(&evidence.revision)
                 ));
             }
         }
@@ -143,11 +158,11 @@ pub fn to_typst(report: &ReportV1) -> String {
         for miss in &report.missed_issues {
             output.push_str(&format!(
                 "- {}（字符 {}–{}）：#quote[{}]；说明：{}\n",
-                typst_escape(miss.category.as_str()),
+                typst_text(miss.category.as_str()),
                 miss.char_start,
                 miss.char_end,
-                typst_escape(&miss.quote),
-                typst_escape(&miss.note)
+                typst_text(&miss.quote),
+                typst_text(&miss.note)
             ));
         }
         output.push('\n');
@@ -279,14 +294,65 @@ fn location_label(location: &SourceLocation) -> String {
     format!("字符 {}–{}", location.char_start, location.char_end)
 }
 
-fn typst_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('#', "\\#")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-        .replace('$', "\\$")
+fn markdown_text(value: &str) -> String {
+    // Escape all CommonMark ASCII punctuation so user text cannot become
+    // formatting, HTML, links or headings. Keep newlines in the same list item.
+    let mut output = String::new();
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    for character in normalized.chars() {
+        if character == '\n' {
+            output.push_str("  \n  ");
+        } else {
+            if character.is_ascii_punctuation() {
+                output.push('\\');
+            }
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn markdown_url(value: &str) -> String {
+    // The angle-bracket destination has a different grammar from link text.
+    let mut output = String::new();
+    for character in value.chars() {
+        if character.is_whitespace()
+            || character.is_control()
+            || matches!(character, '<' | '>' | '\\' | '"')
+        {
+            for byte in character.to_string().as_bytes() {
+                output.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn typst_text(value: &str) -> String {
+    // Dynamic report fields are data, never markup (labels, references, math,
+    // emphasis or code). String arguments also keep multiline text in one field.
+    format!("#text({})", typst_string(value))
+}
+
+fn typst_string(value: &str) -> String {
+    let mut output = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character.is_control() => {
+                output.push_str(&format!("\\u{{{:x}}}", u32::from(character)));
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
 }
 
 #[cfg(test)]
@@ -297,6 +363,121 @@ mod tests {
         AnalysisProfile, AnalysisSnapshot, DocumentFormat, DocumentMetadata, ReportV1,
     };
     use uuid::Uuid;
+
+    #[tokio::test]
+    #[ignore = "requires Typst 0.14.2, Poppler and cmark; explicitly run by export verification"]
+    async fn literal_report_values_survive_exports() {
+        let values = [
+            "file@missing *literal* _name_ <label>.txt",
+            "provider_*_<provider>@provider",
+            "candidate_*_<candidate>@candidate",
+            "verifier_*_<verifier>@verifier",
+            "prompt_*_<prompt>@prompt",
+            "reference_*_<reference>@reference",
+            "analyzer_*_<analyzer>@analyzer",
+            "原文 @missing_reference *literal* _literal_ <synthetic-label> [内容] $公式$ #代码 `代码` &amp; \\\n第二行",
+            "reason @reason *reason* _reason_ <reason> \"quoted\"",
+            "suggestion @suggestion *suggestion* _suggestion_ <suggestion>",
+            "evidence @evidence *evidence* _evidence_ <evidence>",
+            "revision @revision *revision* _revision_ <revision>",
+            "miss @miss *miss* _miss_ <miss>",
+            "note @note *note* _note_ <note>",
+        ];
+        let report: ReportV1 = serde_json::from_value(serde_json::json!({
+            "schema": "textcomb.report.v1",
+            "report_id": Uuid::new_v4(), "job_id": Uuid::new_v4(),
+            "document": {"original_name": values[0], "format": "txt", "char_count": 1000},
+            "analysis": {"provider_kind": values[1], "candidate_model": values[2],
+                "verifier_model": values[3], "prompt_version": values[4],
+                "reference_version": values[5], "analyzer_version": values[6], "reference_profile": false},
+            "summary": {"total": 1, "confirmed": 0, "suspected": 1, "typo": 0,
+                "punctuation": 1, "grammar": 0, "paragraph": 0},
+            "issues": [{"id": Uuid::new_v4(), "category": "punctuation", "level": "suspected",
+                "location": {"document_format": "txt", "char_start": 0,
+                    "char_end": values[7].chars().count(), "quote": values[7]},
+                "original_text": values[7], "reason": values[8], "suggestion": values[9],
+                "confidence": 70, "evidence_refs": [{"source_id": "synthetic", "title": values[10],
+                    "revision": values[11], "source_url": "https://example.invalid/reference?q=%22#section"}]}],
+            "missed_issues": [{"id": Uuid::new_v4(), "category": "typo", "char_start": 0,
+                "char_end": values[12].chars().count(), "quote": values[12], "note": values[13],
+                "created_at": "2026-01-01T00:00:00Z"}],
+            "complete": true, "generated_at": "2026-01-01T00:00:00Z"
+        })).expect("synthetic report");
+        let directory = tempfile::tempdir().expect("temporary export directory");
+        let markdown = directory.path().join("report.md");
+        fs::write(&markdown, to_markdown(&report))
+            .await
+            .expect("Markdown export");
+        let rendered = Command::new("cmark")
+            .arg("--to")
+            .arg("xml")
+            .arg(&markdown)
+            .output()
+            .await
+            .expect("CommonMark renderer available");
+        assert!(rendered.status.success(), "Markdown renders");
+        let xml = String::from_utf8(rendered.stdout).expect("UTF-8 rendered Markdown");
+        let mut reader = quick_xml::Reader::from_str(&xml);
+        let mut markdown_values = String::new();
+        loop {
+            match reader.read_event().expect("valid CommonMark XML") {
+                quick_xml::events::Event::Text(text) => markdown_values.push_str(
+                    &quick_xml::escape::unescape(&text.decode().expect("XML text"))
+                        .expect("XML entities"),
+                ),
+                quick_xml::events::Event::GeneralRef(reference) => {
+                    let entity = format!("&{};", reference.decode().expect("XML entity name"));
+                    markdown_values
+                        .push_str(&quick_xml::escape::unescape(&entity).expect("XML entity"));
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+        }
+        let normalized = |text: &str| text.split_whitespace().collect::<String>();
+        for value in values {
+            assert!(
+                normalized(&markdown_values).contains(&normalized(value)),
+                "Markdown lost literal report value: {value}"
+            );
+        }
+        assert!(
+            xml.contains("destination=\"https://example.invalid/reference?q=%22#section\""),
+            "Markdown evidence link is preserved"
+        );
+        let pdf = directory.path().join("report.pdf");
+        let source = directory.path().join("report.typ");
+        render_pdf(&report, &pdf, &source)
+            .await
+            .expect("literal report PDF renders");
+        assert!(!source.exists(), "temporary report source must be removed");
+        let extracted = Command::new("pdftotext")
+            .arg(&pdf)
+            .arg("-")
+            .output()
+            .await
+            .expect("Poppler available");
+        assert!(extracted.status.success(), "PDF text extraction succeeds");
+        let extracted = String::from_utf8(extracted.stdout).expect("UTF-8 PDF text");
+        for value in values {
+            assert!(
+                normalized(&extracted).contains(&normalized(value)),
+                "PDF lost literal report value: {value}"
+            );
+        }
+        let links = Command::new("pdfinfo")
+            .arg("-url")
+            .arg(&pdf)
+            .output()
+            .await
+            .expect("Poppler available");
+        assert!(links.status.success());
+        assert!(
+            String::from_utf8(links.stdout)
+                .expect("URL output")
+                .contains("https://example.invalid/reference?q=%22#section")
+        );
+    }
 
     #[test]
     fn cross_page_labels_and_legacy_reports_are_readable() {
@@ -384,9 +565,11 @@ mod tests {
         );
         let markdown = to_markdown(&report);
         assert!(markdown.contains("未发现"));
+        for value in [r"openai\_compatible", r"sha256\:test", "未经验证", "v1"] {
+            assert!(markdown.contains(value));
+        }
         let pdf_source = to_typst(&report);
         for value in ["openai_compatible", "sha256:test", "未经验证", "v1"] {
-            assert!(markdown.contains(value));
             assert!(pdf_source.contains(value));
         }
     }
