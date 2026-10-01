@@ -24,13 +24,13 @@ pub(super) fn image_list_is_empty(output: &[u8]) -> bool {
 
 // This is a conservative check of Poppler/Cairo's generated geometry, not a
 // general SVG interpreter. Unknown paint, images, clipping and outlines outside
-// font symbols cannot prove that pdftotext covered a sparse page's contents.
+// font definitions cannot prove that pdftotext covered a sparse page's contents.
 pub(super) fn confirms_sparse_text(svg: &[u8], expected_characters: usize) -> bool {
     let mut reader = Reader::from_reader(svg);
     let mut buffer = Vec::new();
     let mut stack: Vec<Vec<u8>> = Vec::new();
     let mut roots = 0;
-    let mut current_symbol = None;
+    let mut current_glyph: Option<(Vec<u8>, usize)> = None;
     let mut symbols = HashMap::new();
     let mut references = Vec::new();
     loop {
@@ -38,11 +38,14 @@ pub(super) fn confirms_sparse_text(svg: &[u8], expected_characters: usize) -> bo
             Ok(Event::Start(element)) => (element, false),
             Ok(Event::Empty(element)) => (element, true),
             Ok(Event::End(element)) => {
+                let ends_glyph = current_glyph
+                    .as_ref()
+                    .is_some_and(|(_, depth)| *depth == stack.len());
                 if stack.pop().as_deref() != Some(element.name().as_ref()) {
                     return false;
                 }
-                if element.name().as_ref() == b"symbol" {
-                    current_symbol = None;
+                if ends_glyph {
+                    current_glyph = None;
                 }
                 buffer.clear();
                 continue;
@@ -72,29 +75,40 @@ pub(super) fn confirms_sparse_text(svg: &[u8], expected_characters: usize) -> bo
                 roots += 1;
             }
             b"defs" if stack.last().map(Vec::as_slice) == Some(b"svg") => {}
-            b"g" if !stack.is_empty() => {}
-            b"symbol" if in_definitions && current_symbol.is_none() => {
+            // Cairo emits symbol/glyph0-1 definitions on Bookworm and
+            // g/glyph-0-1 definitions on Ubuntu 24.04. In either representation,
+            // paths count as text only inside the named font definition.
+            b"symbol" | b"g"
+                if in_definitions
+                    && attribute(&element, b"id").is_some_and(|id| is_glyph_id(&id)) =>
+            {
+                if current_glyph.is_some() {
+                    return false;
+                }
                 let Some(id) = attribute(&element, b"id") else {
                     return false;
                 };
-                if !is_glyph_id(&id) || symbols.insert(id.clone(), false).is_some() {
+                if symbols.insert(id.clone(), false).is_some() {
                     return false;
                 }
                 if !empty {
-                    current_symbol = Some(id);
+                    current_glyph = Some((id, stack.len() + 1));
                 }
             }
-            b"path" if current_symbol.is_some() && in_definitions => {
+            b"g" if !stack.is_empty() => {}
+            b"path" if current_glyph.is_some() && in_definitions => {
                 let Some(path) = attribute(&element, b"d") else {
                     return false;
                 };
                 if !path.iter().all(u8::is_ascii_whitespace)
-                    && let Some(ink) = current_symbol.as_ref().and_then(|id| symbols.get_mut(id))
+                    && let Some(ink) = current_glyph
+                        .as_ref()
+                        .and_then(|(id, _)| symbols.get_mut(id))
                 {
                     *ink = true;
                 }
             }
-            b"use" if !in_definitions && current_symbol.is_none() && !stack.is_empty() => {
+            b"use" if !in_definitions && current_glyph.is_none() && !stack.is_empty() => {
                 let Some(reference) =
                     attribute(&element, b"xlink:href").or_else(|| attribute(&element, b"href"))
                 else {
@@ -136,6 +150,7 @@ fn is_glyph_id(id: &[u8]) -> bool {
     let Some(suffix) = id.strip_prefix(b"glyph") else {
         return false;
     };
+    let suffix = suffix.strip_prefix(b"-").unwrap_or(suffix);
     let parts: Vec<_> = suffix.split(|byte| *byte == b'-').collect();
     parts.len() == 2
         && parts
@@ -173,6 +188,12 @@ mod tests {
         assert!(confirms_sparse_text(&text, 2));
         assert!(!confirms_sparse_text(&text, 1));
         assert!(!confirms_sparse_text(&text, 3));
+        let grouped_text = svg(
+            r##"<defs><g><g id="glyph-0-0"><g><path d="M 0 0 L 1 1"/></g></g><g id="glyph-0-1"><path d=""/></g></g></defs><g><use href="#glyph-0-0"/><use href="#glyph-0-1"/><use href="#glyph-0-0"/></g>"##,
+        );
+        assert!(confirms_sparse_text(&grouped_text, 2));
+        assert!(!confirms_sparse_text(&grouped_text, 1));
+        assert!(!confirms_sparse_text(&grouped_text, 3));
     }
 
     #[test]
@@ -182,6 +203,9 @@ mod tests {
             r#"<g><path d="M 0 0 L 1 1"/></g>"#,
             r##"<g><use href="#glyph0-1"/></g>"##,
             r#"<defs><symbol id="glyph0-1"/><symbol id="glyph0-1"/></defs>"#,
+            r#"<defs><g id="glyph-0-1"/><g id="glyph-0-1"/></defs>"#,
+            r#"<defs><g id="glyph-0-1"><g id="glyph-0-2"><path d="M 0 0"/></g></g></defs>"#,
+            r#"<defs><g><path d="M 0 0"/></g></defs>"#,
             r#"<defs><symbol id="image0"><path d="M 0 0"/></symbol></defs>"#,
             r#"<defs><clipPath id="clip1"><path d="M 0 0"/></clipPath></defs>"#,
             r#"<g><rect width="1" height="1"/></g>"#,
