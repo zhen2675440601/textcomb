@@ -14,6 +14,8 @@ COPY tools/textcomb-eval ./tools/textcomb-eval
 FROM rust-source AS rust-builder
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
+    cargo clean --release -p textcomb-api -p textcomb-cli -p textcomb-worker \
+      -p textcomb-core -p textcomb-domain -p textcomb-eval && \
     cargo build --locked --release \
       --bin textcomb-api --bin textcomb-worker --bin textcomb-cli && \
     install -Dm755 target/release/textcomb-api /out/textcomb-api && \
@@ -27,6 +29,8 @@ RUN apt-get update && \
 COPY tests ./tests
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
+    cargo clean -p textcomb-api -p textcomb-cli -p textcomb-worker \
+      -p textcomb-core -p textcomb-domain -p textcomb-eval && \
     cargo fmt --all -- --check && \
     cargo test --locked --workspace --all-targets && \
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && \

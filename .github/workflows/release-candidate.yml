@@ -1,0 +1,55 @@
+name: Prepare release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full checked commit SHA already on main
+        required: true
+        type: string
+      version:
+        description: Prerelease version matching workspace/web, e.g. v0.1.0-alpha.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Validate literal commit before checkout
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+        run: |
+          python3 -c 'import os,re; assert re.fullmatch("[0-9a-f]{40}", os.environ["CANDIDATE_COMMIT"]), "Full lowercase SHA required"'
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - name: Read exact-commit checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+        run: |
+          gh api "repos/$GH_REPO/commits/$CANDIDATE_COMMIT/check-runs?per_page=100" > "$RUNNER_TEMP/candidate-checks.json"
+      - name: Verify gates and prepare source/checksum evidence
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 -B -m unittest discover -s tools/release -p 'test_*.py'
+          python3 -B tools/release/prepare.py \
+            --version "$CANDIDATE_VERSION" --commit "$CANDIDATE_COMMIT" \
+            --checks "$RUNNER_TEMP/candidate-checks.json" \
+            --output private-evaluation/release-candidate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-${{ inputs.commit }}
+          path: private-evaluation/release-candidate/
+          if-no-files-found: error
+          retention-days: 14
