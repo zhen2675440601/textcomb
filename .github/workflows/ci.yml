@@ -142,6 +142,8 @@ jobs:
         run: |
           docker run --rm --entrypoint typst textcomb-worker:ci --version
           docker run --rm --entrypoint pdftotext textcomb-worker:ci -v
+          docker run --rm --entrypoint pdftocairo textcomb-worker:ci -v
+          docker run --rm --entrypoint pdfimages textcomb-worker:ci -v
       - uses: actions/setup-node@v4
         with:
           node-version: 24
