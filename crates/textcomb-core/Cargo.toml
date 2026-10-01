@@ -25,6 +25,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
+sqlx-core.workspace = true
+sqlx-postgres.workspace = true
 tempfile.workspace = true
 textcomb-domain.workspace = true
 thiserror.workspace = true
@@ -40,3 +42,6 @@ zip.workspace = true
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
+
+[build-dependencies]
+sqlx-core.workspace = true

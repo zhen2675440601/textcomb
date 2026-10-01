@@ -74,12 +74,14 @@ async fn main() -> anyhow::Result<()> {
             sqlx::query_scalar::<_, i32>("SELECT 1")
                 .fetch_one(&pool)
                 .await?;
-            let pdftotext = command_available("pdftotext");
-            let typst = command_available("typst");
+            let pdftotext = command_available("pdftotext", "-v");
+            let pdfinfo = command_available("pdfinfo", "-v");
+            let typst = command_available("typst", "--version");
             println!("database: ok");
             println!("pdftotext: {}", if pdftotext { "ok" } else { "missing" });
+            println!("pdfinfo: {}", if pdfinfo { "ok" } else { "missing" });
             println!("typst: {}", if typst { "ok" } else { "missing" });
-            if !pdftotext || !typst {
+            if !pdftotext || !pdfinfo || !typst {
                 anyhow::bail!("required binary is missing");
             }
         }
@@ -87,9 +89,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn command_available(command: &str) -> bool {
+fn command_available(command: &str, version_flag: &str) -> bool {
     Command::new(command)
-        .arg("--version")
+        .arg(version_flag)
         .output()
         .is_ok_and(|output| output.status.success())
 }

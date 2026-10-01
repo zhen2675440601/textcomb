@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible product or deployment problem; disclose vulnerabilities privately.
+body:
+  - type: markdown
+    attributes:
+      value: Do not include articles, passwords, model keys or cookies. Report exploitable security issues through https://github.com/zhen2675440601/textcomb/security/advisories/new.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and synthetic reproduction
+      description: Include expected/actual behavior, error code and relevant input format without private text.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Deployment and model protocol
+      description: OS, Docker/toolchain versions, protocol/model name and redacted request/job IDs; no credentials.

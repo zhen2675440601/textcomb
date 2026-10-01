@@ -14,6 +14,8 @@ TextComb 支持三种模型服务接口格式。选择的是**接口协议**，�
 
 模型设置页可以创建、测试、启停和修改模型配置。“初检模型”用于第一轮高召回问题发现；“复核模型”用于第二轮压低误报，留空时自动使用初检模型。
 
+同一用户的配置名称忽略大小写后必须唯一，创建或改名冲突时返回 HTTP 409 并提示更换名称。不同用户可以使用相同名称；共享配置的名称在共享范围内唯一，不与私人配置互相占用。
+
 修改配置时，API 密钥留空会保留原有的加密密钥，网页和接口都不会回传该密钥。每次新建或修改配置都必须再次确认正文会发送给所选服务商。地址、密钥、模型和提示词修改只影响之后创建的任务；已创建任务会继续使用创建时保存的配置快照。
 
 并发上限是上述快照规则的例外：Worker 在模型请求前读取当前上限，修改后不需要重启。下调不会取消已经开始的调用，新请求等待占用数降到新上限以下；等待中的请求每秒检查上调。上限按同一模型配置统计、涵盖两轮调用，但仅在单个 Worker 进程内生效。
@@ -22,13 +24,13 @@ TextComb 支持三种模型服务接口格式。选择的是**接口协议**，�
 
 ## 协议行为
 
-- **OpenAI Responses**：使用原生 Responses 请求体的 `instructions`、`input` 与 `text.format` JSON 模式，并固定发送 `store: false`，避免在支持该字段的服务中保留文章请求状态。模型需要支持 Responses API 与 JSON 模式。
-- **OpenAI Compatible**：使用 Chat Completions 的 `messages` 与 `response_format: {"type":"json_object"}`。适合官方兼容端点、API 网关及本地服务；兼容实现的实际能力由部署者负责确认。
-- **Anthropic**：使用原生 Messages API 的顶层 `system` 与 `messages`，并设置 `max_tokens: 8192`。为兼容更多 Messages API 模型，首版不强制依赖 Anthropic 的可选结构化输出特性；模型仍会收到严格 JSON 要求，服务器会继续验证结构、必要时进行一次 JSON 修复调用。
+- **OpenAI Responses**：使用原生 Responses 请求体的 `instructions`、`input` 与 `text.format` JSON 模式，并固定发送 `store: false`，避免在支持该字段的服务中保留文章请求状态。响应必须明确包含 `status: "completed"`；消息输出项也必须是 `completed`，拒绝、工具调用、错误或未完成详情均会使文本块失败。兼容网关可仅返回 `output_text`，但该字段不能绕过输出项校验，也不能与消息正文冲突。模型需要支持 Responses API 与 JSON 模式。
+- **OpenAI Compatible**：使用 Chat Completions 的 `messages` 与 `response_format: {"type":"json_object"}`。响应必须包含正常结束标记 `finish_reason: "stop"`；截断、内容过滤、工具调用、拒绝或缺少结束标记会使文本块失败，即使正文恰好是合法 JSON 也不生成完整报告。适合官方兼容端点、API 网关及本地服务；兼容实现的实际能力由部署者负责确认。
+- **Anthropic**：使用原生 Messages API 的顶层 `system` 与 `messages`，并设置 `max_tokens: 8192`。请求不配置工具或自定义停止序列，因此响应只接受 `stop_reason: "end_turn"`；达到输出或上下文上限、暂停、工具调用、拒绝以及未知或缺失结束状态均会使文本块失败。合法的思考块不会被当作正文，混入工具或其他不支持内容会被拒绝。为兼容更多 Messages API 模型，首版不强制依赖 Anthropic 的可选结构化输出特性；模型仍会收到严格 JSON 要求，服务器会继续验证结构、必要时进行一次 JSON 修复调用。
 
-上述三种协议共享相同的安全和可靠性边界：超时、429 和 5xx 最多重试三次；响应最多 1 MiB；结构无效时只进行一次“保持语义、不新增判断”的 JSON 修复调用；仍不合法则整个文本块失败。请求、错误和审计日志都不会记录 API 密钥、文章正文或完整提示词。
+上述三种协议共享相同的安全和可靠性边界：超时、429 和 5xx 最多重试三次；响应最多 1 MiB；只有正常结束的响应才允许进入 JSON 解析或修复，修复响应也必须通过相同完成状态校验。结构无效时只进行一次“保持语义、不新增判断”的 JSON 修复调用；仍不合法则整个文本块失败。客户端不自动跟随 HTTP 重定向，30x 会使请求失败；部署者应配置最终 API 地址，避免正文和认证头被转发给未经确认的地址。请求、错误和审计日志都不会记录 API 密钥、文章正文或完整提示词。
 
-OpenAI 的 Responses API 支持通过 `text.format` 约束 JSON 输出，并可通过 `store: false` 关闭默认请求状态保留；Anthropic 的 Messages API 使用顶层 `system` 字段而非 `system` 消息角色。实现依据见 [OpenAI Responses API 参考](https://platform.openai.com/docs/api-reference/responses) 与 [Anthropic Messages API 参考](https://platform.claude.com/docs/en/api/messages/create)。
+OpenAI 的 Responses API 支持通过 `text.format` 约束 JSON 输出，并可通过 `store: false` 关闭默认请求状态保留；Anthropic 的 Messages API 使用顶层 `system` 字段而非 `system` 消息角色。实现依据见 [OpenAI Responses API 参考](https://platform.openai.com/docs/api-reference/responses)、[Anthropic Messages API 参考](https://platform.claude.com/docs/en/api/messages/create) 与 [Anthropic 结束状态说明](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)。
 
 ## 密钥、隐私与质量
 

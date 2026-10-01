@@ -154,7 +154,8 @@ async fn create(
     .bind(fields.verifier_model)
     .bind(fields.max_concurrency)
     .fetch_one(&state.pool)
-    .await?;
+    .await
+    .map_err(model_profile_write_error)?;
     apply_reference_evaluation_scope(&mut profile);
     Ok((StatusCode::CREATED, Json(profile)))
 }
@@ -207,7 +208,8 @@ async fn update(
     .bind(fields.verifier_model)
     .bind(fields.max_concurrency)
     .fetch_optional(&state.pool)
-    .await?
+    .await
+    .map_err(model_profile_write_error)?
     .ok_or_else(|| ApiError(CoreError::public(ErrorCode::NotFound, "模型配置不存在")))?;
 
     apply_reference_evaluation_scope(&mut profile);
@@ -269,6 +271,19 @@ async fn set_enabled(
         )));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn model_profile_write_error(error: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(database) = &error
+        && database.is_unique_violation()
+        && database.constraint() == Some("model_profiles_owner_name_uq")
+    {
+        return ApiError(CoreError::public(
+            ErrorCode::Conflict,
+            "模型配置名称已存在，请使用其他名称",
+        ));
+    }
+    ApiError::from(error)
 }
 
 fn validate_disclosure(accepted: bool) -> Result<(), ApiError> {
@@ -358,6 +373,197 @@ fn validate_base_url(input: &str) -> Result<Url, ApiError> {
         )));
     }
     Ok(url)
+}
+
+#[cfg(test)]
+mod model_profile_name_tests {
+    use super::*;
+    use crate::state::ApiMetrics;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+    use textcomb_core::{AppConfig, auth::UserIdentity, storage::LocalStorage};
+
+    fn fields(name: &str) -> ModelProfileFields {
+        ModelProfileFields {
+            name: name.to_owned(),
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            candidate_model: "candidate".to_owned(),
+            verifier_model: Some("verifier".to_owned()),
+            max_concurrency: Some(2),
+        }
+    }
+
+    fn request(name: &str, shared: bool) -> CreateModelProfileRequest {
+        CreateModelProfileRequest {
+            fields: fields(name),
+            api_key: "synthetic-profile-secret-marker".to_owned(),
+            shared: Some(shared),
+            disclosure_accepted: true,
+        }
+    }
+
+    fn assert_conflict(error: ApiError) {
+        assert_eq!(error.0.code(), ErrorCode::Conflict);
+        assert!(
+            !error
+                .0
+                .safe_message()
+                .contains("synthetic-profile-secret-marker")
+        );
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_and_rename_conflicts_are_safe_and_scoped_to_the_owner() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let temp_root = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp_root.join(format!("textcomb-model-names-{}", Uuid::new_v4()));
+        let state = AppState {
+            pool: pool.clone(),
+            config: Arc::new(AppConfig::from_env().unwrap()),
+            storage: LocalStorage::new(&root).await.unwrap(),
+            metrics: ApiMetrics::new().unwrap(),
+        };
+        let owner = AuthUser(UserIdentity {
+            id: Uuid::new_v4(),
+            username: format!("model-{}", Uuid::new_v4()),
+            role: "super_admin".to_owned(),
+        });
+        let other = AuthUser(UserIdentity {
+            id: Uuid::new_v4(),
+            username: format!("model-{}", Uuid::new_v4()),
+            role: "user".to_owned(),
+        });
+        for user in [&owner, &other] {
+            sqlx::query(
+                "INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused',$3)",
+            )
+            .bind(user.0.id)
+            .bind(&user.0.username)
+            .bind(&user.0.role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let name = format!("Model-{}", Uuid::new_v4());
+        let (_, Json(first)) = create(
+            State(state.clone()),
+            owner.clone(),
+            Json(request(&name, false)),
+        )
+        .await
+        .unwrap();
+        assert_conflict(
+            create(
+                State(state.clone()),
+                owner.clone(),
+                Json(request(&name.to_lowercase(), false)),
+            )
+            .await
+            .unwrap_err(),
+        );
+        let (_, Json(other_profile)) = create(
+            State(state.clone()),
+            other.clone(),
+            Json(request(&name, false)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(other_profile.name, name);
+        assert_ne!(other_profile.id, first.id);
+        assert!(!other_profile.shared);
+        let second_name = format!("Other-{}", Uuid::new_v4());
+        let (_, Json(second)) = create(
+            State(state.clone()),
+            owner.clone(),
+            Json(request(&second_name, false)),
+        )
+        .await
+        .unwrap();
+        assert_conflict(
+            update(
+                State(state.clone()),
+                owner.clone(),
+                Path(second.id),
+                Json(UpdateModelProfileRequest {
+                    fields: fields(&name),
+                    api_key: Some("synthetic-profile-secret-marker".to_owned()),
+                    disclosure_accepted: true,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        let unchanged: String = sqlx::query_scalar("SELECT name FROM model_profiles WHERE id = $1")
+            .bind(second.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(unchanged, second_name);
+        let foreign = update(
+            State(state.clone()),
+            other.clone(),
+            Path(first.id),
+            Json(UpdateModelProfileRequest {
+                fields: fields("foreign"),
+                api_key: None,
+                disclosure_accepted: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(foreign.into_response().status(), StatusCode::NOT_FOUND);
+        let (_, Json(shared_profile)) = create(
+            State(state.clone()),
+            owner.clone(),
+            Json(request(&name, true)),
+        )
+        .await
+        .unwrap();
+        assert!(shared_profile.shared);
+        assert_conflict(
+            create(
+                State(state.clone()),
+                owner.clone(),
+                Json(request(&name.to_lowercase(), true)),
+            )
+            .await
+            .unwrap_err(),
+        );
+        let forbidden = create(
+            State(state.clone()),
+            other.clone(),
+            Json(request("shared", true)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(forbidden.into_response().status(), StatusCode::FORBIDDEN);
+        // A different unique constraint must still be treated as an unexpected
+        // database failure, rather than misreported as a name collision.
+        let primary_key_error = sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,$3,'https://example.test',decode('00','hex'),'test','test',now())")
+            .bind(first.id).bind(owner.0.id).bind(format!("Unique-{}", Uuid::new_v4()))
+            .execute(&pool).await.unwrap_err();
+        assert_eq!(
+            model_profile_write_error(primary_key_error).0.code(),
+            ErrorCode::DatabaseFailed
+        );
+        sqlx::query("DELETE FROM model_profiles WHERE owner_id = $1 OR owner_id = $2 OR (owner_id IS NULL AND lower(name) = lower($3))")
+            .bind(owner.0.id).bind(other.0.id).bind(&name).execute(&pool).await.unwrap();
+        for user in [owner, other] {
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(user.0.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let created_root = root.canonicalize().unwrap();
+        assert_eq!(created_root.parent(), Some(temp_root.as_path()));
+        tokio::fs::remove_dir_all(created_root).await.unwrap();
+    }
 }
 
 #[cfg(test)]

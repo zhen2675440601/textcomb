@@ -1,25 +1,55 @@
 name: Security
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   schedule:
     - cron: "17 2 * * 1"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
-  dependencies:
+  rust:
+    name: Rust dependency audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
-      - uses: rustsec/audit-check@v2
+      - name: Install pinned lockfile scanner
+        if: ${{ !cancelled() }}
+        run: cargo install cargo-audit --version 0.22.2 --locked --no-default-features
+      - name: Verify independent audit and exposure handling
+        if: ${{ !cancelled() }}
+        run: python3 -B -m unittest discover -s tools/security -v
+      - name: Independently record exposure and audit Rust dependencies
+        if: ${{ !cancelled() }}
+        run: python3 -B tools/security/rust_audit.py
+      - name: Retain scan evidence even when vulnerabilities fail the job
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          name: rust-security-${{ github.run_id }}
+          path: |
+            rust-audit.json
+            rust-audit-stderr.txt
+            rust-audit-config.toml
+            rsa-dependency-paths.txt
+            rsa-exposure.json
+            rust-security-status.json
+          retention-days: 14
+  web:
+    name: Frontend dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -27,5 +57,12 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci --ignore-scripts
         working-directory: web
-      - run: npm audit --audit-level=high
+      - run: npm audit --audit-level=high --json > npm-audit.json
         working-directory: web
+      - name: Retain frontend scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-security-${{ github.run_id }}
+          path: web/npm-audit.json
+          retention-days: 14

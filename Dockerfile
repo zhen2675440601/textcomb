@@ -14,6 +14,8 @@ COPY tools/textcomb-eval ./tools/textcomb-eval
 FROM rust-source AS rust-builder
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
+    cargo clean --release -p textcomb-api -p textcomb-cli -p textcomb-worker \
+      -p textcomb-core -p textcomb-domain -p textcomb-eval && \
     cargo build --locked --release \
       --bin textcomb-api --bin textcomb-worker --bin textcomb-cli && \
     install -Dm755 target/release/textcomb-api /out/textcomb-api && \
@@ -21,8 +23,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     install -Dm755 target/release/textcomb-cli /out/textcomb-cli
 
 FROM rust-source AS test
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends poppler-utils && \
+    rm -rf /var/lib/apt/lists/*
+COPY tests ./tests
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
+    cargo clean -p textcomb-api -p textcomb-cli -p textcomb-worker \
+      -p textcomb-core -p textcomb-domain -p textcomb-eval && \
     cargo fmt --all -- --check && \
     cargo test --locked --workspace --all-targets && \
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && \
@@ -44,7 +52,7 @@ ENTRYPOINT ["dumb-init", "--"]
 FROM runtime-base AS api
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk && \
+    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk fonts-hanazono fonts-noto-color-emoji && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=typst /bin/typst /usr/local/bin/typst
 COPY --from=rust-builder /out/textcomb-api /usr/local/bin/textcomb-api
@@ -56,7 +64,7 @@ CMD ["textcomb-api"]
 FROM runtime-base AS worker
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk poppler-utils && \
+    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk fonts-hanazono fonts-noto-color-emoji poppler-utils && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=typst /bin/typst /usr/local/bin/typst
 COPY --from=rust-builder /out/textcomb-worker /usr/local/bin/textcomb-worker
