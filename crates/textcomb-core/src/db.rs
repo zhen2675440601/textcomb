@@ -1481,6 +1481,55 @@ mod tests {
 mod cleanup_tests {
     use super::*;
 
+    struct CleanupTestDatabase {
+        pool: PgPool,
+        admin_pool: PgPool,
+        schema: String,
+    }
+
+    impl CleanupTestDatabase {
+        async fn create(database_url: &str) -> Self {
+            let admin_pool = PgPool::connect(database_url).await.unwrap();
+            // Cleanup scans every document. Unique fixture IDs cannot prevent
+            // another parallel test from cleaning a partly constructed fixture.
+            let schema = format!("cleanup_test_{}", Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE SCHEMA {schema}"))
+                .execute(&admin_pool)
+                .await
+                .unwrap();
+            let search_path = format!("SET search_path TO {schema}");
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .after_connect(move |connection, _| {
+                    let search_path = search_path.clone();
+                    Box::pin(async move {
+                        sqlx::query(&search_path).execute(connection).await?;
+                        Ok(())
+                    })
+                })
+                .connect(database_url)
+                .await
+                .unwrap();
+            migrate(&pool).await.unwrap();
+            Self {
+                pool,
+                admin_pool,
+                schema,
+            }
+        }
+
+        async fn close(self) {
+            self.pool.close().await;
+            // Only the generated schema is removed; the shared database and
+            // other test/real schemas are never selected for cleanup.
+            sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
+                .execute(&self.admin_pool)
+                .await
+                .unwrap();
+            self.admin_pool.close().await;
+        }
+    }
+
     struct ActiveInputFixture {
         user_id: Uuid,
         document_id: Uuid,
@@ -1546,7 +1595,8 @@ mod cleanup_tests {
         let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
             return;
         };
-        let pool = PgPool::connect(&database_url).await.unwrap();
+        let database = CleanupTestDatabase::create(&database_url).await;
+        let pool = database.pool.clone();
         let mut fixtures = Vec::new();
         for status in [
             "queued",
@@ -1564,6 +1614,7 @@ mod cleanup_tests {
             fixture.assert_retained(&pool, &targets).await;
             fixture.remove(&pool).await;
         }
+        database.close().await;
     }
 
     #[tokio::test]
@@ -1571,7 +1622,8 @@ mod cleanup_tests {
         let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
             return;
         };
-        let pool = PgPool::connect(&database_url).await.unwrap();
+        let database = CleanupTestDatabase::create(&database_url).await;
+        let pool = database.pool.clone();
         let fixture = ActiveInputFixture::create(&pool, "failed").await;
         let mut retry = pool.begin().await.unwrap();
         sqlx::query("SELECT id FROM analysis_jobs WHERE id = $1 FOR UPDATE")
@@ -1593,6 +1645,7 @@ mod cleanup_tests {
         let targets = cleanup.await.unwrap();
         fixture.assert_retained(&pool, &targets).await;
         fixture.remove(&pool).await;
+        database.close().await;
     }
 
     #[tokio::test]
@@ -1600,7 +1653,8 @@ mod cleanup_tests {
         let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
             return;
         };
-        let pool = PgPool::connect(&database_url).await.unwrap();
+        let database = CleanupTestDatabase::create(&database_url).await;
+        let pool = database.pool.clone();
         let user_id = Uuid::new_v4();
         let profile_id = Uuid::new_v4();
         let failed_document = Uuid::new_v4();
@@ -1692,13 +1746,15 @@ mod cleanup_tests {
             .execute(&pool)
             .await
             .unwrap();
+        database.close().await;
     }
     #[tokio::test]
     async fn automatic_report_expiry_updates_history_and_preserves_other_source_consumers() {
         let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
             return;
         };
-        let pool = PgPool::connect(&database_url).await.unwrap();
+        let database = CleanupTestDatabase::create(&database_url).await;
+        let pool = database.pool.clone();
         for (other_status, other_report, valid_input, preserve_source) in [
             (None, false, false, false),
             (Some("completed"), true, false, true),
@@ -1796,5 +1852,33 @@ mod cleanup_tests {
                 .await
                 .unwrap();
         }
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_test_schemas_do_not_share_expired_documents() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let first = CleanupTestDatabase::create(&database_url).await;
+        let second = CleanupTestDatabase::create(&database_url).await;
+        let fixture = ActiveInputFixture::create(&first.pool, "failed").await;
+        let unrelated_targets = cleanup_expired(&second.pool).await.unwrap();
+        fixture
+            .assert_retained(&first.pool, &unrelated_targets)
+            .await;
+        assert!(unrelated_targets.is_empty());
+        let own_targets = cleanup_expired(&first.pool).await.unwrap();
+        assert_eq!(own_targets.len(), 1);
+        let source: Option<String> =
+            sqlx::query_scalar("SELECT extracted_text FROM documents WHERE id = $1")
+                .bind(fixture.document_id)
+                .fetch_one(&first.pool)
+                .await
+                .unwrap();
+        assert!(source.is_none());
+        fixture.remove(&first.pool).await;
+        second.close().await;
+        first.close().await;
     }
 }
