@@ -76,12 +76,16 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             let pdftotext = command_available("pdftotext", "-v");
             let pdfinfo = command_available("pdfinfo", "-v");
+            let pdftocairo = command_available("pdftocairo", "-v");
+            let pdfimages = command_available("pdfimages", "-v");
             let typst = command_available("typst", "--version");
             println!("database: ok");
             println!("pdftotext: {}", if pdftotext { "ok" } else { "missing" });
             println!("pdfinfo: {}", if pdfinfo { "ok" } else { "missing" });
+            println!("pdftocairo: {}", if pdftocairo { "ok" } else { "missing" });
+            println!("pdfimages: {}", if pdfimages { "ok" } else { "missing" });
             println!("typst: {}", if typst { "ok" } else { "missing" });
-            if !pdftotext || !pdfinfo || !typst {
+            if !pdftotext || !pdfinfo || !pdftocairo || !pdfimages || !typst {
                 anyhow::bail!("required binary is missing");
             }
         }

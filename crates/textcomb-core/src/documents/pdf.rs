@@ -8,10 +8,16 @@ use tokio::{
     time,
 };
 
+mod coverage;
+
+#[cfg(test)]
+mod compatibility_tests;
+
 const PDF_EXTRACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_PDF_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PDF_ERROR_BYTES: usize = 16 * 1024;
 const MAX_PDF_INFO_BYTES: usize = 64 * 1024;
+const MAX_PDF_PAGE_SVG_BYTES: usize = 1024 * 1024;
 
 pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
     time::timeout(PDF_EXTRACT_TIMEOUT, extract_inner(path))
@@ -25,7 +31,7 @@ pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
 }
 
 async fn extract_inner(path: &Path) -> CoreResult<ExtractedDocument> {
-    ensure_unencrypted(path).await?;
+    let page_count = inspect_metadata(path).await?;
     let mut command = Command::new("pdftotext");
     command
         .kill_on_drop(true)
@@ -70,7 +76,22 @@ async fn extract_inner(path: &Path) -> CoreResult<ExtractedDocument> {
     let text = String::from_utf8(output.1).map_err(|_| {
         CoreError::public(ErrorCode::ExtractionFailed, "PDF 提取结果不是有效 UTF-8")
     })?;
-    let pages = validate_text_pages(&text)?;
+    let pages = split_text_pages(&text, page_count)?;
+    if pages.iter().all(|page| page.trim().is_empty()) {
+        return Err(CoreError::public(
+            ErrorCode::PdfScanned,
+            "PDF 没有可提取的文字",
+        ));
+    }
+    for (index, page) in pages.iter().enumerate() {
+        let characters = page
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count();
+        if characters < 10 {
+            inspect_sparse_page(path, index + 1, characters).await?;
+        }
+    }
     let mut lines = Vec::new();
     for (page_index, page) in pages.into_iter().enumerate() {
         let page_lines: Vec<&str> = page.lines().collect();
@@ -89,7 +110,7 @@ async fn extract_inner(path: &Path) -> CoreResult<ExtractedDocument> {
     Ok(build_document(DocumentFormat::Pdf, lines))
 }
 
-async fn ensure_unencrypted(path: &Path) -> CoreResult<()> {
+async fn inspect_metadata(path: &Path) -> CoreResult<usize> {
     // pdftotext can successfully open an owner-encrypted PDF with an empty
     // user password. Check encryption explicitly before consuming its body.
     let mut child = Command::new("pdfinfo")
@@ -132,7 +153,9 @@ async fn ensure_unencrypted(path: &Path) -> CoreResult<()> {
             "PDF 检测失败",
         ));
     }
-    validate_encryption_info(&String::from_utf8_lossy(&info))
+    let info = String::from_utf8_lossy(&info);
+    validate_encryption_info(&info)?;
+    validate_page_count(&info)
 }
 
 fn validate_encryption_info(info: &str) -> CoreResult<()> {
@@ -154,35 +177,114 @@ fn validate_encryption_info(info: &str) -> CoreResult<()> {
     Ok(())
 }
 
-fn validate_text_pages(text: &str) -> CoreResult<Vec<&str>> {
-    let mut pages: Vec<&str> = text.split('\u{000c}').collect();
-    // pdftotext normally appends a form feed after the final page.
-    if pages.last().is_some_and(|page| page.trim().is_empty()) {
-        pages.pop();
+fn validate_page_count(info: &str) -> CoreResult<usize> {
+    let values: Vec<_> = info
+        .lines()
+        .filter_map(|line| line.strip_prefix("Pages:"))
+        .map(str::trim)
+        .collect();
+    if let [value] = values.as_slice()
+        && let Ok(count) = value.parse::<usize>()
+        && count > 0
+        && u32::try_from(count).is_ok()
+    {
+        return Ok(count);
     }
-    for (index, page) in pages.iter().enumerate() {
-        if page
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .count()
-            < 10
-        {
-            return Err(CoreError::public(
-                ErrorCode::PdfScanned,
-                format!(
-                    "PDF 第 {} 页可提取文字不足，无法确认已覆盖全文；请改用 TXT 或 DOCX",
-                    index + 1
-                ),
-            ));
-        }
-    }
-    if pages.is_empty() {
+    Err(CoreError::public(
+        ErrorCode::ExtractionFailed,
+        "无法确认 PDF 页数",
+    ))
+}
+
+fn split_text_pages(text: &str, expected_pages: usize) -> CoreResult<Vec<&str>> {
+    // Remove exactly the final separator. An empty final page still contributes
+    // its own separator and must retain its original page number.
+    let pages: Vec<_> = text
+        .strip_suffix('\u{000c}')
+        .unwrap_or(text)
+        .split('\u{000c}')
+        .collect();
+    if expected_pages == 0 || pages.len() != expected_pages {
         return Err(CoreError::public(
-            ErrorCode::PdfScanned,
-            "PDF 没有可提取的文字",
+            ErrorCode::ExtractionFailed,
+            "PDF 提取页数与文件页数不一致，无法确认全文完整",
         ));
     }
     Ok(pages)
+}
+
+async fn inspect_sparse_page(path: &Path, page: usize, characters: usize) -> CoreResult<()> {
+    // Refuse raster paint from metadata before rendering: inspecting a scan
+    // must not decode a potentially very large compressed image just to reject it.
+    let mut images = Command::new("pdfimages");
+    images
+        .arg("-f")
+        .arg(page.to_string())
+        .arg("-l")
+        .arg(page.to_string())
+        .arg("-list")
+        .arg(path);
+    let images = run_page_inspection(images, MAX_PDF_INFO_BYTES).await?;
+    if !coverage::image_list_is_empty(&images) {
+        return Err(unconfirmed_page(page));
+    }
+    let mut render = Command::new("pdftocairo");
+    render
+        .arg("-svg")
+        .arg("-f")
+        .arg(page.to_string())
+        .arg("-l")
+        .arg(page.to_string())
+        .arg(path)
+        .arg("-");
+    let svg = run_page_inspection(render, MAX_PDF_PAGE_SVG_BYTES).await?;
+    if !coverage::confirms_sparse_text(&svg, characters) {
+        return Err(unconfirmed_page(page));
+    }
+    Ok(())
+}
+
+fn unconfirmed_page(page: usize) -> CoreError {
+    CoreError::public(
+        ErrorCode::PdfScanned,
+        format!("PDF 第 {page} 页无法确认文字已完整提取；请改用 TXT 或 DOCX"),
+    )
+}
+
+async fn run_page_inspection(mut command: Command, limit: usize) -> CoreResult<Vec<u8>> {
+    let mut child = command
+        .kill_on_drop(true)
+        .env("LC_ALL", "C")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| {
+            CoreError::public(
+                ErrorCode::ExtractionFailed,
+                "PDF 页面检查工具不可用，请检查 Poppler 安装",
+            )
+        })?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        CoreError::public(ErrorCode::ExtractionFailed, "无法读取 PDF 页面检查结果")
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        CoreError::public(ErrorCode::ExtractionFailed, "无法读取 PDF 页面检查错误")
+    })?;
+    let (output, errors) = tokio::try_join!(
+        read_limited(&mut stdout, limit, ErrorCode::ExtractionFailed),
+        read_limited(
+            &mut stderr,
+            MAX_PDF_ERROR_BYTES,
+            ErrorCode::ExtractionFailed
+        ),
+    )?;
+    if !child.wait().await?.success() || !errors.is_empty() {
+        return Err(CoreError::public(
+            ErrorCode::ExtractionFailed,
+            "PDF 页面内容检查失败",
+        ));
+    }
+    Ok(output)
 }
 
 async fn read_limited<R: AsyncRead + Unpin>(
@@ -259,20 +361,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_scanned_page_after_a_text_cover() {
-        let error = validate_text_pages("这是一页真实的文章正文。\u{000c}\u{000c}").unwrap_err();
-        assert_eq!(error.code(), ErrorCode::PdfScanned);
-        assert!(error.safe_message().contains("第 2 页"));
+    fn page_count_and_separators_preserve_empty_pages_and_reject_missing_pages() {
+        assert_eq!(
+            split_text_pages("正文\u{000c}\u{000c}短页\u{000c}\u{000c}", 4).unwrap(),
+            ["正文", "", "短页", ""]
+        );
+        assert_eq!(split_text_pages("正文\u{000c}", 1).unwrap(), ["正文"]);
+        assert_eq!(split_text_pages("短页", 1).unwrap(), ["短页"]);
+        for (text, count) in [("正文\u{000c}", 2), ("正文\u{000c}\u{000c}", 1), ("", 0)] {
+            assert_eq!(
+                split_text_pages(text, count).unwrap_err().code(),
+                ErrorCode::ExtractionFailed
+            );
+        }
     }
 
     #[test]
-    fn ignores_trailing_form_feed_after_last_text_page() {
-        assert_eq!(
-            validate_text_pages("这是一页真实的文章正文。\u{000c}")
-                .unwrap()
-                .len(),
-            1
-        );
+    fn page_count_metadata_must_be_present_unambiguous_and_positive() {
+        assert_eq!(validate_page_count("Pages:    7\n").unwrap(), 7);
+        for info in [
+            "Encrypted: no\n",
+            "Pages: 1\nPages: 1\n",
+            "Pages: 0\n",
+            "Pages: -1\n",
+            "Pages: unknown\n",
+            "Pages: 4294967296\n",
+        ] {
+            assert_eq!(
+                validate_page_count(info).unwrap_err().code(),
+                ErrorCode::ExtractionFailed
+            );
+        }
     }
 
     #[tokio::test]

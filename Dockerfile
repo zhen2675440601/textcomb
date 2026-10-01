@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM rust-source AS test
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends poppler-utils && \
+    apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk && \
     rm -rf /var/lib/apt/lists/*
 COPY tests ./tests
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
