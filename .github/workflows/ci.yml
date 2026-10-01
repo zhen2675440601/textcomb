@@ -29,13 +29,20 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install PDF test tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk fonts-hanazono fonts-noto-color-emoji cmark
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --all-targets --locked
+      - name: Verify literal report exports
+        run: |
+          typst_container=$(docker create ghcr.io/typst/typst:0.14.2)
+          trap 'docker rm "$typst_container" >/dev/null' EXIT
+          docker cp "$typst_container:/bin/typst" "$RUNNER_TEMP/typst"
+          chmod +x "$RUNNER_TEMP/typst"
+          PATH="$RUNNER_TEMP:$PATH" cargo test --locked -p textcomb-core literal_report_values_survive_exports -- --ignored
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings

@@ -40,6 +40,8 @@ docker compose down
 
 固定工具链：Rust 1.97.1、Node 24 LTS、PostgreSQL 18、Poppler、Typst 0.14.2。Windows 本机编译 Rust 还需要 Visual Studio Build Tools 的“使用 C++ 的桌面开发”；不想安装时可直接使用容器构建。
 
+PDF 报告还需要覆盖正文字符的系统字体。容器安装 Noto CJK、Hanazono 和 Noto Color Emoji，分别覆盖常用中文、扩展汉字和 Emoji；本机运行 Typst 时也要安装这些字体或覆盖相同字符的替代字体。只有 Typst 返回成功不能证明字符完整，CI 使用真实 PDF 文字提取检查原文、建议及漏检字段中的补充平面字符和组合 Emoji。
+
 后端：
 
 ```shell
