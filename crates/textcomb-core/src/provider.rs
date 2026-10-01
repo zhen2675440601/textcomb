@@ -203,6 +203,9 @@ impl JsonProtocolProvider {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(300))
+            // Credentials and document bodies are authorized only for the
+            // configured endpoint, never an unreviewed redirect destination.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("textcomb/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| CoreError::Internal(anyhow::Error::new(error)))?;
@@ -496,11 +499,30 @@ fn extract_provider_output(
 fn extract_chat_output(body: Value) -> CoreResult<(String, TokenUsage)> {
     let response: ChatResponse = serde_json::from_value(body)
         .map_err(|_| CoreError::public(ErrorCode::ModelOutputInvalid, "模型服务返回了无效响应"))?;
-    let content = response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| choice.message.content.into_text())
+    let choice = response.choices.into_iter().next().ok_or_else(|| {
+        CoreError::public(ErrorCode::ModelOutputInvalid, "模型没有返回结构化内容")
+    })?;
+    // Valid JSON alone cannot prove that analysis finished before the output
+    // limit or a provider filter. Require the protocol's normal stop marker.
+    if choice.finish_reason.as_deref() != Some("stop")
+        || choice.message.function_call.is_some()
+        || choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.as_array().is_some_and(Vec::is_empty))
+        || choice
+            .message
+            .refusal
+            .as_deref()
+            .is_some_and(|refusal| !refusal.trim().is_empty())
+    {
+        return Err(CoreError::public(
+            ErrorCode::ModelOutputInvalid,
+            "模型响应未正常完成或拒绝了请求",
+        ));
+    }
+    let content = Some(choice.message.content.into_text()?)
         .filter(|content| !content.trim().is_empty())
         .ok_or_else(|| {
             CoreError::public(ErrorCode::ModelOutputInvalid, "模型没有返回结构化内容")
@@ -523,32 +545,63 @@ fn extract_chat_output(body: Value) -> CoreResult<(String, TokenUsage)> {
 fn extract_responses_output(body: Value) -> CoreResult<(String, TokenUsage)> {
     let response: ResponsesResponse = serde_json::from_value(body)
         .map_err(|_| CoreError::public(ErrorCode::ModelOutputInvalid, "模型服务返回了无效响应"))?;
-    if let Some(status) = response.status.as_deref()
-        && status != "completed"
+    if response.status.as_deref() != Some("completed")
+        || response.error.is_some()
+        || response.incomplete_details.is_some()
     {
         return Err(CoreError::public(
             ErrorCode::ModelOutputInvalid,
             "模型响应未正常完成",
         ));
     }
-    let content = response
+    let mut texts = Vec::new();
+    let mut has_message = false;
+    for item in response.output {
+        match item.kind.as_str() {
+            "reasoning"
+                if item
+                    .status
+                    .as_deref()
+                    .is_none_or(|status| status == "completed") => {}
+            "message" if item.status.as_deref() == Some("completed") => {
+                has_message = true;
+                if item.content.is_empty() {
+                    return Err(invalid_output("模型没有返回结构化内容"));
+                }
+                for part in item.content {
+                    if part.kind != "output_text" {
+                        return Err(invalid_output("模型响应包含拒绝或不支持的内容"));
+                    }
+                    texts.push(
+                        part.text
+                            .ok_or_else(|| invalid_output("模型返回了无效文本内容"))?,
+                    );
+                }
+            }
+            _ => return Err(invalid_output("模型输出项未正常完成或包含不支持的工具调用")),
+        }
+    }
+    let text = texts.concat();
+    if has_message && text.trim().is_empty() {
+        return Err(invalid_output("模型没有返回结构化内容"));
+    }
+    let flattened = response
         .output_text
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            let text = response
-                .output
-                .into_iter()
-                .filter(|item| item.kind == "message")
-                .flat_map(|item| item.content)
-                .filter(|part| part.kind == "output_text")
-                .filter_map(|part| part.text)
-                .collect::<Vec<_>>()
-                .join("\n");
-            (!text.trim().is_empty()).then_some(text)
-        })
-        .ok_or_else(|| {
-            CoreError::public(ErrorCode::ModelOutputInvalid, "模型没有返回结构化内容")
-        })?;
+        .filter(|value| !value.trim().is_empty());
+    // Some gateways expose the SDK's flattened text convenience field. It must
+    // not hide abnormal output items or disagree with the authoritative text.
+    if !text.trim().is_empty()
+        && flattened
+            .as_ref()
+            .is_some_and(|value| value.trim() != text.trim())
+    {
+        return Err(invalid_output("模型返回的文本内容不一致"));
+    }
+    let content = if text.trim().is_empty() {
+        flattened.ok_or_else(|| invalid_output("模型没有返回结构化内容"))?
+    } else {
+        text
+    };
     Ok((
         content,
         TokenUsage {
@@ -564,22 +617,26 @@ fn extract_responses_output(body: Value) -> CoreResult<(String, TokenUsage)> {
 fn extract_anthropic_output(body: Value) -> CoreResult<(String, TokenUsage)> {
     let response: AnthropicResponse = serde_json::from_value(body)
         .map_err(|_| CoreError::public(ErrorCode::ModelOutputInvalid, "模型服务返回了无效响应"))?;
-    if matches!(
-        response.stop_reason.as_deref(),
-        Some("max_tokens" | "refusal")
-    ) {
+    // No tools or stop sequences were requested. Only an ended assistant turn
+    // proves completion; token/context limits and paused tool turns do not.
+    if response.stop_reason.as_deref() != Some("end_turn") {
         return Err(CoreError::public(
             ErrorCode::ModelOutputInvalid,
             "模型响应未完整结束",
         ));
     }
-    let content = response
-        .content
-        .into_iter()
-        .filter(|part| part.kind == "text")
-        .filter_map(|part| part.text)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut texts = Vec::new();
+    for part in response.content {
+        match part.kind.as_str() {
+            "text" => texts.push(
+                part.text
+                    .ok_or_else(|| invalid_output("模型返回了无效文本内容"))?,
+            ),
+            "thinking" | "redacted_thinking" => {}
+            _ => return Err(invalid_output("模型响应包含拒绝或不支持的工具调用")),
+        }
+    }
+    let content = texts.join("\n");
     if content.trim().is_empty() {
         return Err(CoreError::public(
             ErrorCode::ModelOutputInvalid,
@@ -713,11 +770,19 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ChatResponseMessage {
     content: ChatContent,
+    #[serde(default)]
+    refusal: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Value>,
+    #[serde(default)]
+    function_call: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -728,16 +793,22 @@ enum ChatContent {
 }
 
 impl ChatContent {
-    fn into_text(self) -> String {
-        match self {
-            Self::Text(value) => value,
-            Self::Parts(parts) => parts
-                .into_iter()
-                .filter(|part| part.kind == "text")
-                .filter_map(|part| part.text)
-                .collect::<Vec<_>>()
-                .join("\n"),
+    fn into_text(self) -> CoreResult<String> {
+        let parts = match self {
+            Self::Text(value) => return Ok(value),
+            Self::Parts(parts) => parts,
+        };
+        let mut texts = Vec::new();
+        for part in parts {
+            if part.kind != "text" {
+                return Err(invalid_output("模型响应包含拒绝或不支持的内容"));
+            }
+            texts.push(
+                part.text
+                    .ok_or_else(|| invalid_output("模型返回了无效文本内容"))?,
+            );
         }
+        Ok(texts.join("\n"))
     }
 }
 
@@ -766,6 +837,10 @@ struct ResponsesResponse {
     #[serde(default)]
     output: Vec<ResponsesOutputItem>,
     #[serde(default)]
+    error: Option<Value>,
+    #[serde(default)]
+    incomplete_details: Option<Value>,
+    #[serde(default)]
     usage: Option<ResponsesUsage>,
 }
 
@@ -773,6 +848,8 @@ struct ResponsesResponse {
 struct ResponsesOutputItem {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
+    status: Option<String>,
     #[serde(default)]
     content: Vec<ResponsesOutputContent>,
 }
@@ -823,6 +900,227 @@ struct AnthropicUsage {
 mod tests {
     use super::*;
 
+    struct ResponseSequence {
+        responses: tokio::sync::Mutex<std::collections::VecDeque<Value>>,
+        requests: tokio::sync::Mutex<Vec<(axum::http::HeaderMap, Value)>>,
+    }
+
+    struct ProtocolTestService {
+        base_url: String,
+        state: Arc<ResponseSequence>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for ProtocolTestService {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl ProtocolTestService {
+        async fn start(responses: Vec<Value>) -> Self {
+            use axum::{Json, Router, extract::State, routing::post};
+            async fn reply(
+                State(state): State<Arc<ResponseSequence>>,
+                headers: axum::http::HeaderMap,
+                Json(body): Json<Value>,
+            ) -> Json<Value> {
+                state.requests.lock().await.push((headers, body));
+                Json(
+                    state
+                        .responses
+                        .lock()
+                        .await
+                        .pop_front()
+                        .unwrap_or(Value::Null),
+                )
+            }
+            let state = Arc::new(ResponseSequence {
+                responses: tokio::sync::Mutex::new(responses.into()),
+                requests: tokio::sync::Mutex::new(Vec::new()),
+            });
+            let app = Router::new()
+                .route("/v1/responses", post(reply))
+                .route("/v1/messages", post(reply))
+                .route("/v1/chat/completions", post(reply))
+                .with_state(state.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            Self {
+                base_url,
+                state,
+                task,
+            }
+        }
+
+        fn provider(&self, protocol: ProviderKind) -> JsonProtocolProvider {
+            let mut profile = sample_profile();
+            profile.base_url = self.base_url.clone();
+            JsonProtocolProvider::new(protocol, profile).unwrap()
+        }
+    }
+
+    fn mark_abnormal_completion(protocol: ProviderKind, body: &mut Value) {
+        match protocol {
+            ProviderKind::OpenAiCompatible => body["choices"][0]["finish_reason"] = json!("length"),
+            ProviderKind::OpenAiResponses => body["status"] = json!("incomplete"),
+            ProviderKind::Anthropic => body["stop_reason"] = json!("model_context_window_exceeded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn abnormal_protocol_completion_never_reaches_json_repair() {
+        for protocol in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::OpenAiResponses,
+            ProviderKind::Anthropic,
+        ] {
+            for text in ["{\"issues\":[]}", "not json"] {
+                let mut response = normal_response(protocol, text);
+                mark_abnormal_completion(protocol, &mut response);
+                let service = ProtocolTestService::start(vec![response]).await;
+                let result = service
+                    .provider(protocol)
+                    .candidates("合成测试正文", &[])
+                    .await;
+                assert_eq!(result.unwrap_err().code(), ErrorCode::ModelOutputInvalid);
+                assert_eq!(service.state.requests.lock().await.len(), 1);
+            }
+            let mut response = normal_response(protocol, "{\"verdicts\":[]}");
+            mark_abnormal_completion(protocol, &mut response);
+            let service = ProtocolTestService::start(vec![response]).await;
+            assert_eq!(
+                service
+                    .provider(protocol)
+                    .verify("合成测试正文", &[], &[])
+                    .await
+                    .unwrap_err()
+                    .code(),
+                ErrorCode::ModelOutputInvalid
+            );
+            assert_eq!(service.state.requests.lock().await.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn json_repair_requires_normal_completion_and_preserves_authentication() {
+        for protocol in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::OpenAiResponses,
+            ProviderKind::Anthropic,
+        ] {
+            for complete in [false, true] {
+                let mut repaired = normal_response(protocol, "{\"issues\":[]}");
+                if !complete {
+                    mark_abnormal_completion(protocol, &mut repaired);
+                }
+                let service = ProtocolTestService::start(vec![
+                    normal_response(protocol, "not json"),
+                    repaired,
+                ])
+                .await;
+                let result = service
+                    .provider(protocol)
+                    .candidates("合成测试正文", &[])
+                    .await;
+                if complete {
+                    let result = result.unwrap();
+                    assert!(result.value.issues.is_empty());
+                    assert_eq!(result.usage.prompt_tokens, Some(12));
+                    assert_eq!(result.repair.unwrap().usage.completion_tokens, Some(5));
+                } else {
+                    assert_eq!(result.unwrap_err().code(), ErrorCode::ModelOutputInvalid);
+                }
+                let requests = service.state.requests.lock().await;
+                assert_eq!(requests.len(), 2);
+                for (headers, request) in requests.iter() {
+                    assert_eq!(request["model"], json!("candidate"));
+                    match protocol {
+                        ProviderKind::Anthropic => {
+                            assert_eq!(headers["x-api-key"], "test-key");
+                            assert_eq!(headers["anthropic-version"], ANTHROPIC_API_VERSION);
+                            assert!(!headers.contains_key("authorization"));
+                        }
+                        _ => {
+                            assert_eq!(headers["authorization"], "Bearer test-key");
+                            assert!(!headers.contains_key("x-api-key"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_redirects_do_not_forward_credentials_or_document_body() {
+        use axum::{Json, Router, extract::State, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for protocol in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::OpenAiResponses,
+            ProviderKind::Anthropic,
+        ] {
+            for status in [
+                StatusCode::MOVED_PERMANENTLY,
+                StatusCode::FOUND,
+                StatusCode::SEE_OTHER,
+                StatusCode::TEMPORARY_REDIRECT,
+                StatusCode::PERMANENT_REDIRECT,
+            ] {
+                let destination_count = Arc::new(AtomicUsize::new(0));
+                let destination_listener =
+                    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let target_url = format!(
+                    "http://{}/redirect-destination",
+                    destination_listener.local_addr().unwrap()
+                );
+                // Redirects may change POST to GET or drop the JSON body. Count
+                // every method without requiring JSON, so forwarding cannot
+                // escape detection by failing a request-body extractor.
+                let destination_app = Router::new()
+                    .fallback(any(
+                        |State((count, response)): State<(Arc<AtomicUsize>, Value)>| async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Json(response)
+                        },
+                    ))
+                    .with_state((
+                        destination_count.clone(),
+                        normal_response(protocol, "{\"issues\":[]}"),
+                    ));
+                let destination_task = tokio::spawn(async move {
+                    axum::serve(destination_listener, destination_app)
+                        .await
+                        .unwrap();
+                });
+                let count = Arc::new(AtomicUsize::new(0));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let source_url = format!("http://{}/v1", listener.local_addr().unwrap());
+                let app = Router::new().fallback(any(
+                    move |State((target_url, count)): State<(String, Arc<AtomicUsize>)>| async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        (status, [(axum::http::header::LOCATION, target_url)])
+                    }
+                )).with_state((target_url, count.clone()));
+                let task = tokio::spawn(async move {
+                    axum::serve(listener, app).await.unwrap();
+                });
+                let mut profile = sample_profile();
+                profile.base_url = source_url;
+                let provider = JsonProtocolProvider::new(protocol, profile).unwrap();
+                let result = provider.candidates("合成测试正文", &[]).await;
+                task.abort();
+                destination_task.abort();
+                assert_eq!(result.unwrap_err().code(), ErrorCode::ProviderUnavailable);
+                assert_eq!(count.load(Ordering::SeqCst), 1);
+                assert_eq!(destination_count.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+
     struct ModelTestService {
         base_url: String,
         models: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -846,7 +1144,7 @@ mod tests {
                     if model == "broken" {
                         (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": "unavailable model"})))
                     } else {
-                        (axum::http::StatusCode::OK, Json(json!({"choices": [{"message": {"content": "{\"ok\":true}"}}]})))
+                        (axum::http::StatusCode::OK, Json(json!({"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]})))
                     }
                 }
             )).with_state(models.clone());
@@ -985,6 +1283,7 @@ mod tests {
                 "status": "completed",
                 "output": [{
                     "type": "message",
+                    "status": "completed",
                     "content": [{ "type": "output_text", "text": "{\"ok\":true}" }]
                 }],
                 "usage": { "input_tokens": 12, "output_tokens": 5 }
@@ -1007,6 +1306,269 @@ mod tests {
         assert_eq!(content, "{\"ok\":true}");
         assert_eq!(usage.prompt_tokens, Some(7));
         assert_eq!(usage.completion_tokens, Some(4));
+    }
+
+    #[test]
+    fn native_completion_requires_explicit_normal_end_even_with_valid_json() {
+        for (protocol, field, reasons) in [
+            (
+                ProviderKind::OpenAiResponses,
+                "status",
+                vec![
+                    "incomplete",
+                    "failed",
+                    "in_progress",
+                    "queued",
+                    "cancelled",
+                    "unexpected",
+                    "",
+                ],
+            ),
+            (
+                ProviderKind::Anthropic,
+                "stop_reason",
+                vec![
+                    "max_tokens",
+                    "model_context_window_exceeded",
+                    "pause_turn",
+                    "tool_use",
+                    "refusal",
+                    "stop_sequence",
+                    "unexpected",
+                    "",
+                ],
+            ),
+        ] {
+            let base = normal_response(protocol, "{\"issues\":[]}");
+            for reason in reasons {
+                let mut body = base.clone();
+                body[field] = json!(reason);
+                assert_invalid_response(protocol, body);
+            }
+            let mut missing = base.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert_invalid_response(protocol, missing);
+            let mut null = base;
+            null[field] = Value::Null;
+            assert_invalid_response(protocol, null);
+        }
+    }
+
+    #[test]
+    fn responses_reject_abnormal_items_and_refusal_before_flattened_text() {
+        for status in [
+            json!("incomplete"),
+            json!("in_progress"),
+            json!("unexpected"),
+            Value::Null,
+        ] {
+            let mut body = normal_response(ProviderKind::OpenAiResponses, "{\"issues\":[]}");
+            body["output"][0]["status"] = status;
+            body["output_text"] = json!("{\"issues\":[]}");
+            assert_invalid_response(ProviderKind::OpenAiResponses, body);
+        }
+        let mut missing = normal_response(ProviderKind::OpenAiResponses, "{\"issues\":[]}");
+        missing["output"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
+        assert_invalid_response(ProviderKind::OpenAiResponses, missing);
+        let mut empty = normal_response(ProviderKind::OpenAiResponses, " ");
+        empty["output_text"] = json!("{\"issues\":[]}");
+        assert_invalid_response(ProviderKind::OpenAiResponses, empty);
+        for part in [
+            json!({"type": "refusal", "refusal": "declined"}),
+            json!({"type": "unexpected", "text": "ignored"}),
+            json!({"type": "output_text", "text": null}),
+        ] {
+            let mut body = normal_response(ProviderKind::OpenAiResponses, "{\"issues\":[]}");
+            body["output"][0]["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(part);
+            body["output_text"] = json!("{\"issues\":[]}");
+            assert_invalid_response(ProviderKind::OpenAiResponses, body);
+        }
+        for item in [
+            json!({"type": "function_call", "status": "completed"}),
+            json!({"type": "reasoning", "status": "incomplete"}),
+        ] {
+            let mut body = normal_response(ProviderKind::OpenAiResponses, "{\"issues\":[]}");
+            body["output"].as_array_mut().unwrap().push(item);
+            assert_invalid_response(ProviderKind::OpenAiResponses, body);
+        }
+        for field in ["error", "incomplete_details"] {
+            let mut body = normal_response(ProviderKind::OpenAiResponses, "{\"issues\":[]}");
+            body[field] = json!({"reason": "output limit"});
+            assert_invalid_response(ProviderKind::OpenAiResponses, body);
+        }
+    }
+
+    #[test]
+    fn completed_text_does_not_hide_tool_or_refusal_blocks() {
+        for protocol in [ProviderKind::Anthropic, ProviderKind::OpenAiCompatible] {
+            for kind in ["tool_use", "server_tool_use", "refusal", "unexpected"] {
+                let mut body = normal_response(protocol, "{\"issues\":[]}");
+                if protocol == ProviderKind::Anthropic {
+                    body["content"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"type": kind}));
+                } else {
+                    body["choices"][0]["message"]["content"] = json!([
+                        {"type": "text", "text": "{\"issues\":[]}"}, {"type": kind}
+                    ]);
+                }
+                assert_invalid_response(protocol, body);
+            }
+        }
+        for field in ["tool_calls", "function_call"] {
+            let mut body = normal_response(ProviderKind::OpenAiCompatible, "{\"issues\":[]}");
+            body["choices"][0]["message"][field] = json!([{"name": "unfinished"}]);
+            assert_invalid_response(ProviderKind::OpenAiCompatible, body);
+        }
+    }
+
+    #[test]
+    fn completed_native_responses_preserve_reasoning_and_gateway_text() {
+        let mut body = normal_response(ProviderKind::OpenAiResponses, "{\"issues\":[]}");
+        body["output"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"type": "reasoning", "summary": []}));
+        body["output_text"] = json!("{\"issues\":[]}");
+        assert_eq!(
+            extract_provider_output(ProviderKind::OpenAiResponses, body.clone())
+                .unwrap()
+                .0,
+            "{\"issues\":[]}"
+        );
+        body["output_text"] = json!("{\"issues\":[{}]}");
+        assert_invalid_response(ProviderKind::OpenAiResponses, body);
+        assert_eq!(
+            extract_provider_output(
+                ProviderKind::OpenAiResponses,
+                json!({
+                    "status": "completed", "output_text": "{\"issues\":[]}"
+                })
+            )
+            .unwrap()
+            .0,
+            "{\"issues\":[]}"
+        );
+        let mut split = normal_response(ProviderKind::OpenAiResponses, "{\"iss");
+        split["output"][0]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "output_text", "text": "ues\":[]}"}));
+        split["output_text"] = json!("{\"issues\":[]}");
+        assert_eq!(
+            extract_provider_output(ProviderKind::OpenAiResponses, split)
+                .unwrap()
+                .0,
+            "{\"issues\":[]}"
+        );
+
+        let mut body = normal_response(ProviderKind::Anthropic, "{\"issues\":[]}");
+        body["content"].as_array_mut().unwrap().insert(
+            0,
+            json!({"type": "thinking", "thinking": "opaque reasoning"}),
+        );
+        body["content"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"type": "redacted_thinking", "data": "opaque"}));
+        assert_eq!(
+            extract_provider_output(ProviderKind::Anthropic, body)
+                .unwrap()
+                .0,
+            "{\"issues\":[]}"
+        );
+    }
+
+    fn normal_response(protocol: ProviderKind, text: &str) -> Value {
+        match protocol {
+            ProviderKind::OpenAiCompatible => json!({
+                "choices": [{"finish_reason": "stop", "message": {"content": text}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5}
+            }),
+            ProviderKind::OpenAiResponses => json!({
+                "status": "completed",
+                "output": [{"type": "message", "status": "completed", "content": [{"type": "output_text", "text": text}]}],
+                "usage": {"input_tokens": 12, "output_tokens": 5}
+            }),
+            ProviderKind::Anthropic => json!({
+                "stop_reason": "end_turn", "content": [{"type": "text", "text": text}],
+                "usage": {"input_tokens": 12, "output_tokens": 5}
+            }),
+        }
+    }
+
+    fn assert_invalid_response(protocol: ProviderKind, body: Value) {
+        assert_eq!(
+            extract_provider_output(protocol, body).unwrap_err().code(),
+            ErrorCode::ModelOutputInvalid
+        );
+    }
+
+    #[test]
+    fn compatible_completion_requires_normal_stop_even_with_valid_json() {
+        for reason in [
+            Some("length"),
+            Some("content_filter"),
+            Some("tool_calls"),
+            Some("function_call"),
+            Some("unexpected"),
+            Some(""),
+            None,
+        ] {
+            let body = json!({
+                "choices": [{
+                    "message": {"content": "{\"issues\":[]}"},
+                    "finish_reason": reason
+                }]
+            });
+            assert_eq!(
+                extract_chat_output(body).unwrap_err().code(),
+                ErrorCode::ModelOutputInvalid,
+                "abnormal completion: {reason:?}"
+            );
+        }
+        let missing = json!({"choices": [{"message": {"content": "{\"issues\":[]}"}}]});
+        assert_eq!(
+            extract_chat_output(missing).unwrap_err().code(),
+            ErrorCode::ModelOutputInvalid
+        );
+    }
+
+    #[test]
+    fn compatible_completion_rejects_refusal_and_preserves_text_parts_and_usage() {
+        let refused = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "{\"issues\":[]}", "refusal": "refused"}
+            }]
+        });
+        assert_eq!(
+            extract_chat_output(refused).unwrap_err().code(),
+            ErrorCode::ModelOutputInvalid
+        );
+        for content in [
+            json!("{\"issues\":[]}"),
+            json!([{"type": "text", "text": "{\"issues\":[]}"}]),
+        ] {
+            let (text, usage) = extract_chat_output(json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"content": content, "refusal": null, "tool_calls": [], "function_call": null}
+                }],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5}
+            }))
+            .unwrap();
+            assert_eq!(text, "{\"issues\":[]}");
+            assert_eq!(usage.prompt_tokens, Some(12));
+            assert_eq!(usage.completion_tokens, Some(5));
+        }
     }
 
     #[test]

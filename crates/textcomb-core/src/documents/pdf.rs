@@ -11,8 +11,21 @@ use tokio::{
 const PDF_EXTRACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_PDF_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PDF_ERROR_BYTES: usize = 16 * 1024;
+const MAX_PDF_INFO_BYTES: usize = 64 * 1024;
 
 pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
+    time::timeout(PDF_EXTRACT_TIMEOUT, extract_inner(path))
+        .await
+        .map_err(|_| {
+            CoreError::public(
+                ErrorCode::ExtractionFailed,
+                "PDF 检测与文字提取超过 60 秒安全上限",
+            )
+        })?
+}
+
+async fn extract_inner(path: &Path) -> CoreResult<ExtractedDocument> {
+    ensure_unencrypted(path).await?;
     let mut command = Command::new("pdftotext");
     command
         .kill_on_drop(true)
@@ -23,7 +36,7 @@ pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
         .arg("-")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = time::timeout(PDF_EXTRACT_TIMEOUT, async {
+    let output = async {
         let mut child = command.spawn()?;
         let mut stdout = child.stdout.take().ok_or_else(|| {
             CoreError::public(ErrorCode::ExtractionFailed, "无法读取 PDF 提取结果")
@@ -41,14 +54,8 @@ pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
         )?;
         let status = child.wait().await?;
         Ok::<_, CoreError>((status, text, error_text))
-    })
-    .await
-    .map_err(|_| {
-        CoreError::public(
-            ErrorCode::ExtractionFailed,
-            "PDF 文字提取超过 60 秒安全上限",
-        )
-    })??;
+    }
+    .await?;
 
     if !output.0.success() {
         let stderr = String::from_utf8_lossy(&output.2).to_ascii_lowercase();
@@ -80,6 +87,71 @@ pub async fn extract(path: &Path) -> CoreResult<ExtractedDocument> {
         lines.pop();
     }
     Ok(build_document(DocumentFormat::Pdf, lines))
+}
+
+async fn ensure_unencrypted(path: &Path) -> CoreResult<()> {
+    // pdftotext can successfully open an owner-encrypted PDF with an empty
+    // user password. Check encryption explicitly before consuming its body.
+    let mut child = Command::new("pdfinfo")
+        .kill_on_drop(true)
+        .env("LC_ALL", "C")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| {
+            CoreError::public(
+                ErrorCode::ExtractionFailed,
+                "PDF 检测工具不可用，请检查 Poppler 安装",
+            )
+        })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CoreError::public(ErrorCode::ExtractionFailed, "无法读取 PDF 检测结果"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CoreError::public(ErrorCode::ExtractionFailed, "无法读取 PDF 检测错误"))?;
+    let (info, error_text) = tokio::try_join!(
+        read_limited(&mut stdout, MAX_PDF_INFO_BYTES, ErrorCode::ExtractionFailed),
+        read_limited(
+            &mut stderr,
+            MAX_PDF_ERROR_BYTES,
+            ErrorCode::ExtractionFailed
+        ),
+    )?;
+    let status = child.wait().await?;
+    if !status.success() {
+        let error = String::from_utf8_lossy(&error_text).to_ascii_lowercase();
+        if error.contains("password") || error.contains("encrypted") {
+            return Err(CoreError::public(ErrorCode::PdfEncrypted, "不支持加密 PDF"));
+        }
+        return Err(CoreError::public(
+            ErrorCode::ExtractionFailed,
+            "PDF 检测失败",
+        ));
+    }
+    validate_encryption_info(&String::from_utf8_lossy(&info))
+}
+
+fn validate_encryption_info(info: &str) -> CoreResult<()> {
+    let flags: Vec<&str> = info
+        .lines()
+        .filter_map(|line| line.strip_prefix("Encrypted:"))
+        .map(str::trim)
+        .collect();
+    if flags.iter().any(|value| value.starts_with("yes")) {
+        return Err(CoreError::public(ErrorCode::PdfEncrypted, "不支持加密 PDF"));
+    }
+    // Reject ambiguous metadata instead of trusting a forged earlier line.
+    if flags.as_slice() != ["no"] {
+        return Err(CoreError::public(
+            ErrorCode::ExtractionFailed,
+            "无法确认 PDF 加密状态",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_text_pages(text: &str) -> CoreResult<Vec<&str>> {
@@ -136,6 +208,55 @@ async fn read_limited<R: AsyncRead + Unpin>(
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn rejects_encrypted_pdfs_including_an_empty_user_password() {
+        let samples: &[&[u8]] = &[
+            include_bytes!("../../../../tests/fixtures/owner-encrypted.pdf"),
+            include_bytes!("../../../../tests/fixtures/password-encrypted.pdf"),
+        ];
+        for sample in samples {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), sample).unwrap();
+            let error = extract(file.path()).await.unwrap_err();
+            assert_eq!(error.code(), ErrorCode::PdfEncrypted);
+        }
+    }
+
+    #[tokio::test]
+    async fn extracts_an_unencrypted_text_pdf_after_the_encryption_check() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            include_bytes!("../../../../tests/fixtures/e2e-sample.pdf"),
+        )
+        .unwrap();
+        let document = extract(file.path()).await.unwrap();
+        assert!(document.text.contains("心情很繁重"));
+    }
+
+    #[test]
+    fn encryption_metadata_must_be_unambiguous_and_unencrypted() {
+        assert!(validate_encryption_info("Title: sample\nEncrypted:   no\nPages: 1\n").is_ok());
+        for info in [
+            "Pages: 1\n",
+            "Encrypted: unknown\n",
+            "Encrypted: no\nEncrypted: no\n",
+        ] {
+            assert_eq!(
+                validate_encryption_info(info).unwrap_err().code(),
+                ErrorCode::ExtractionFailed
+            );
+        }
+        assert_eq!(
+            validate_encryption_info(
+                "Title: forged\nEncrypted: no\nEncrypted: yes (algorithm: RC4)\n"
+            )
+            .unwrap_err()
+            .code(),
+            ErrorCode::PdfEncrypted
+        );
+    }
 
     #[test]
     fn rejects_a_scanned_page_after_a_text_cover() {

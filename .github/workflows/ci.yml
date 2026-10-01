@@ -23,6 +23,8 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install PDF test tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -93,13 +95,15 @@ jobs:
       - name: Verify embedded migration compatibility and history validation
         run: cargo test --locked -p textcomb-core migrations::tests
       - name: Verify input retention against PostgreSQL
-        run: cargo test --locked -p textcomb-core expired_failed_input_drops_body_but_active_report_keeps_its_source
+        run: cargo test --locked -p textcomb-core cleanup_tests
       - name: Verify concurrent analysis creation against PostgreSQL
         run: cargo test --locked -p textcomb-api concurrent_requests_create_only_one_job_for_a_document
       - name: Verify Worker terminal ownership against PostgreSQL
         run: cargo test --locked -p textcomb-core lifecycle_tests
       - name: Verify deletion and retry locking against PostgreSQL
         run: cargo test --locked -p textcomb-api deletion_
+      - name: Verify model profile name conflicts against PostgreSQL
+        run: cargo test --locked -p textcomb-api model_profile_name_tests
 
   container:
     runs-on: ubuntu-24.04
