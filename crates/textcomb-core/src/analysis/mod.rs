@@ -442,26 +442,95 @@ pub fn finalize_issues(
                 }
             })
             .collect();
-        let location = document.location(
-            candidate.source_start,
-            candidate.source_end,
-            &candidate.quote,
-        )?;
+        // Refine a resolved source span only after verification. Keep the level
+        // derived from the original protected span and classification agreement.
+        let edit = (!classification_changed)
+            .then(|| localize_literal_edit(category, &candidate.quote, &verdict.suggestion))
+            .flatten();
+        let (source_start, source_end, original_text, suggestion) = match edit {
+            Some(edit) => {
+                let start = candidate.source_start + edit.char_offset;
+                let end = start + edit.original_text.chars().count();
+                (start, end, edit.original_text, edit.suggestion)
+            }
+            None => (
+                candidate.source_start,
+                candidate.source_end,
+                candidate.quote.clone(),
+                verdict.suggestion,
+            ),
+        };
+        let location = document.location(source_start, source_end, &original_text)?;
         issues.push(Issue {
             id: Uuid::new_v4(),
             category,
             grammar_subtype,
             level,
             location,
-            original_text: candidate.quote.clone(),
+            original_text,
             reason: verdict.reason,
-            suggestion: verdict.suggestion,
+            suggestion,
             confidence: verdict.confidence.min(100),
             evidence_refs,
             feedback: None,
         });
     }
     Ok(deduplicate_issues(issues))
+}
+
+struct LiteralEdit {
+    char_offset: usize,
+    original_text: String,
+    suggestion: String,
+}
+
+fn localize_literal_edit(
+    category: IssueCategory,
+    quote: &str,
+    suggestion: &str,
+) -> Option<LiteralEdit> {
+    if !matches!(category, IssueCategory::Typo | IssueCategory::Punctuation) {
+        return None;
+    }
+    let original: Vec<char> = quote.chars().collect();
+    let replacement: Vec<char> = suggestion.chars().collect();
+    let prefix = original
+        .iter()
+        .zip(&replacement)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = original[prefix..]
+        .iter()
+        .rev()
+        .zip(replacement[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let shared = prefix + suffix;
+    let original_end = original.len() - suffix;
+    let replacement_end = replacement.len() - suffix;
+    // This is literal edit alignment, not a language rule or an interpretation
+    // of free-form advice. Most of the quoted context must be preserved, the
+    // change must be small, and insertions retain a nonempty contextual quote.
+    if shared < 4
+        || shared * 4 < original.len() * 3
+        || original_end == prefix
+        || original_end - prefix > 8
+        || replacement_end - prefix > 8
+    {
+        return None;
+    }
+    let original_text: String = original[prefix..original_end].iter().collect();
+    let replacement_text: String = replacement[prefix..replacement_end].iter().collect();
+    let suggestion = if replacement_text.is_empty() {
+        format!("删除此处的“{original_text}”")
+    } else {
+        replacement_text
+    };
+    Some(LiteralEdit {
+        char_offset: prefix,
+        original_text,
+        suggestion,
+    })
 }
 
 /// These diagnoses often depend on intent or discourse outside the sentence.
@@ -682,6 +751,224 @@ mod tests {
     fn overlapping_quotes_are_ambiguous_without_context() {
         assert_eq!(locate_unique("哈哈哈", "哈哈", None, None), None);
         assert_eq!(locate_unique("哈哈哈", "哈哈", None, Some("哈")), Some(0));
+    }
+
+    fn literal_fixture(
+        text: &str,
+        quote: &str,
+        suggestions: &[&str],
+        category: IssueCategory,
+        profile: AnalysisProfile,
+    ) -> (
+        ExtractedDocument,
+        Vec<ResolvedCandidate>,
+        Vec<VerifiedCandidate>,
+    ) {
+        let char_count = text.chars().count();
+        let document = ExtractedDocument {
+            format: textcomb_domain::DocumentFormat::Txt,
+            text: text.to_owned(),
+            segments: vec![crate::documents::SourceSegment {
+                char_start: 0,
+                char_end: char_count,
+                page: None,
+                line: Some(1),
+                paragraph_index: 0,
+            }],
+            char_count,
+        };
+        let subtype = (category == IssueCategory::Grammar).then_some(GrammarSubtype::Collocation);
+        let candidates = suggestions
+            .iter()
+            .map(|suggestion| CandidateIssue {
+                category,
+                grammar_subtype: subtype,
+                quote: quote.to_owned(),
+                context_before: None,
+                context_after: None,
+                reason: "Synthetic literal edit".to_owned(),
+                suggestion: (*suggestion).to_owned(),
+                confidence: 95,
+                evidence_source_ids: Vec::new(),
+            })
+            .collect();
+        let chunks = chunk_text(text);
+        assert_eq!(chunks.len(), 1);
+        let resolved = resolve_candidates(&chunks[0], candidates, profile);
+        assert_eq!(resolved.len(), suggestions.len());
+        let verdicts = suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, suggestion)| VerifiedCandidate {
+                candidate_index: index,
+                category: Some(category),
+                grammar_subtype: subtype,
+                verdict: VerificationVerdict::Confirmed,
+                confidence: 95,
+                reason: "Independent synthetic verification".to_owned(),
+                suggestion: (*suggestion).to_owned(),
+                evidence_source_ids: Vec::new(),
+            })
+            .collect();
+        (document, resolved, verdicts)
+    }
+
+    #[test]
+    fn literal_edits_keep_unicode_offsets_and_resolved_duplicate_context() {
+        let text = "再来一次。🧪我们再教室里学习。再见。";
+        let quote = "🧪我们再教室里学习。";
+        let (document, resolved, verdicts) = literal_fixture(
+            text,
+            quote,
+            &["🧪我们在教室里学习。"],
+            IssueCategory::Typo,
+            AnalysisProfile::General,
+        );
+        let issues = finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+            .expect("verified literal edit");
+        let issue = &issues[0];
+        assert_eq!(issue.original_text, "再");
+        assert_eq!(issue.suggestion, "在");
+        assert_eq!(issue.location.char_start, 8);
+        assert_eq!(issue.location.char_end, 9);
+        assert_eq!(issue.location.quote, "再");
+        assert_eq!(document.text, text);
+        assert_eq!(issue.level, IssueLevel::Confirmed);
+    }
+
+    #[test]
+    fn literal_punctuation_deletion_has_a_nonempty_readable_suggestion() {
+        let quote = "大家准时到达了。。";
+        let (document, resolved, verdicts) = literal_fixture(
+            quote,
+            quote,
+            &["大家准时到达了。"],
+            IssueCategory::Punctuation,
+            AnalysisProfile::General,
+        );
+        let issues = finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+            .expect("verified deletion");
+        assert_eq!(issues[0].original_text, "。");
+        assert_eq!(issues[0].suggestion, "删除此处的“。”");
+        assert_eq!(issues[0].location.char_start, 8);
+        assert_eq!(issues[0].location.char_end, 9);
+    }
+
+    #[test]
+    fn literal_edits_preserve_the_original_protected_span_downgrade() {
+        let quote = "2026年，我们再教室里学习。";
+        let (document, resolved, verdicts) = literal_fixture(
+            quote,
+            quote,
+            &["2026年，我们在教室里学习。"],
+            IssueCategory::Typo,
+            AnalysisProfile::Financial,
+        );
+        assert!(resolved[0].protected);
+        let issues = finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+            .expect("protected literal edit");
+        assert_eq!(issues[0].original_text, "再");
+        assert_eq!(issues[0].level, IssueLevel::Suspected);
+    }
+
+    #[test]
+    fn literal_edits_preserve_grammar_context_and_classification_disagreements() {
+        let quote = "他的心情很繁重。";
+        let (document, resolved, verdicts) = literal_fixture(
+            quote,
+            quote,
+            &["他的心情很沉重。"],
+            IssueCategory::Grammar,
+            AnalysisProfile::General,
+        );
+        let issues = finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+            .expect("grammar context");
+        assert_eq!(issues[0].original_text, quote);
+        let quote = "我们再教室里学习。";
+        let (document, mut resolved, verdicts) = literal_fixture(
+            quote,
+            quote,
+            &["我们在教室里学习。"],
+            IssueCategory::Typo,
+            AnalysisProfile::General,
+        );
+        resolved[0].category = IssueCategory::Grammar;
+        resolved[0].grammar_subtype = Some(GrammarSubtype::Collocation);
+        let issues = finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+            .expect("classification disagreement");
+        assert_eq!(issues[0].original_text, quote);
+        assert_eq!(issues[0].level, IssueLevel::Suspected);
+    }
+
+    #[test]
+    fn literal_alignment_leaves_advice_insertions_and_large_changes_unchanged() {
+        for (quote, suggestion) in [
+            ("我们再教室里学习。", "建议将再改成在"),
+            ("今天大家到了。", "今天大家都到了。"),
+            ("我们再教室里学习。", "我们再教室里学习。"),
+            ("我们再教室里学习。", ""),
+            ("错", "正"),
+            ("", ""),
+            (
+                "前文前文前文前文前文前文前文前文前文错误片段超过八个字后文后文后文后文后文后文",
+                "前文前文前文前文前文前文前文前文前文正确后文后文后文后文后文后文",
+            ),
+        ] {
+            assert!(
+                localize_literal_edit(IssueCategory::Typo, quote, suggestion).is_none(),
+                "{quote}"
+            );
+        }
+    }
+
+    #[test]
+    fn literal_alignment_keeps_distinct_edits_from_the_same_sentence() {
+        let quote = "今天我们再教室里学习，所有资料已经全步准备齐全。";
+        let first = quote.replace('再', "在");
+        let second = quote.replace('步', "部");
+        let (document, resolved, verdicts) = literal_fixture(
+            quote,
+            quote,
+            &[&first, &second],
+            IssueCategory::Typo,
+            AnalysisProfile::General,
+        );
+        let issues = finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+            .expect("two independently verified edits");
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].original_text, "再");
+        assert_eq!(issues[1].original_text, "步");
+        for issue in &issues {
+            let source: String = document
+                .text
+                .chars()
+                .skip(issue.location.char_start as usize)
+                .take((issue.location.char_end - issue.location.char_start) as usize)
+                .collect();
+            assert_eq!(source, issue.original_text);
+        }
+    }
+
+    #[test]
+    fn literal_alignment_cannot_rescue_rejected_or_low_confidence_predictions() {
+        for (verdict, confidence) in [
+            (VerificationVerdict::Rejected, 95),
+            (VerificationVerdict::Confirmed, 49),
+        ] {
+            let quote = "我们再教室里学习。";
+            let (document, resolved, mut verdicts) = literal_fixture(
+                quote,
+                quote,
+                &["我们在教室里学习。"],
+                IssueCategory::Typo,
+                AnalysisProfile::General,
+            );
+            verdicts[0].verdict = verdict;
+            verdicts[0].confidence = confidence;
+            let issues = finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+                .expect("rejected prediction");
+            assert!(issues.is_empty());
+        }
     }
 
     #[test]
