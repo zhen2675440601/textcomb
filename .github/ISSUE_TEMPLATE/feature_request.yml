@@ -1,0 +1,17 @@
+name: Feature request
+description: Propose a change within the Chinese proofreading MVP boundary.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem and example
+      description: Use synthetic examples, without private articles.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Proposed behavior, scope and acceptance checks
+      description: Explain how the proposal fits docs/PROJECT.md and docs/ROADMAP.md.
+    validations:
+      required: true

@@ -129,7 +129,7 @@ async fn create(
         r#"
         SELECT id FROM documents
         WHERE id = $1 AND user_id = $2 AND storage_path IS NOT NULL
-          AND input_expires_at > now()
+          AND input_expires_at > clock_timestamp()
         FOR UPDATE
         "#,
     )
@@ -282,7 +282,7 @@ async fn retry(
         WHERE job.id = $1 AND job.user_id = $2 AND job.status = 'failed'
           AND documents.id = job.document_id
           AND documents.storage_path IS NOT NULL
-          AND documents.input_expires_at > now()
+          AND documents.input_expires_at > clock_timestamp()
         "#,
     )
     .bind(job_id)

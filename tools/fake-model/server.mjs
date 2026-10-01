@@ -133,7 +133,7 @@ const server = createServer((request, response) => {
         JSON.stringify({
           id: "fake-textcomb-response",
           object: "chat.completion",
-          choices: [{ index: 0, message: { role: "assistant", content } }],
+          choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
           usage: { prompt_tokens: 100, completion_tokens: 40 },
         }),
       );
