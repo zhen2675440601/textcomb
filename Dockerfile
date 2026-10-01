@@ -44,7 +44,7 @@ ENTRYPOINT ["dumb-init", "--"]
 FROM runtime-base AS api
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk && \
+    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk fonts-hanazono fonts-noto-color-emoji && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=typst /bin/typst /usr/local/bin/typst
 COPY --from=rust-builder /out/textcomb-api /usr/local/bin/textcomb-api
@@ -56,7 +56,7 @@ CMD ["textcomb-api"]
 FROM runtime-base AS worker
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk poppler-utils && \
+    apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk fonts-hanazono fonts-noto-color-emoji poppler-utils && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=typst /bin/typst /usr/local/bin/typst
 COPY --from=rust-builder /out/textcomb-worker /usr/local/bin/textcomb-worker
