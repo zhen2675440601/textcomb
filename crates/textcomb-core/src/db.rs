@@ -1266,70 +1266,85 @@ pub async fn load_report_source(
 }
 
 pub async fn cleanup_expired(pool: &PgPool) -> CoreResult<Vec<CleanupTarget>> {
-    let paths: Vec<Option<String>> = sqlx::query_scalar(
+    let documents: Vec<Uuid> = sqlx::query_scalar(
         r#"
-        SELECT storage_path FROM documents
+        SELECT id FROM documents
         WHERE input_expires_at IS NOT NULL AND input_expires_at < now()
+        ORDER BY id
         "#,
     )
     .fetch_all(pool)
     .await?;
-    sqlx::query(
-        r#"
-        UPDATE analysis_chunks AS chunk
-        SET content = NULL, candidate_output = NULL, verifier_output = NULL,
-            updated_at = now()
-        FROM analysis_jobs AS job
-        JOIN documents AS document ON document.id = job.document_id
-        WHERE chunk.job_id = job.id
-          AND document.input_expires_at IS NOT NULL
-          AND document.input_expires_at < now()
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    // Failed inputs have no report that justifies retaining the extracted body.
-    // A completed report still needs this body for source-position navigation.
-    sqlx::query(
-        r#"
-        UPDATE documents AS document
-        SET extracted_text = NULL
-        WHERE document.input_expires_at IS NOT NULL
-          AND document.input_expires_at < now()
-          AND NOT EXISTS (
-              SELECT 1 FROM analysis_jobs AS job
-              JOIN reports AS report ON report.job_id = job.id
-              WHERE job.document_id = document.id AND report.expires_at > now()
-          )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE documents AS document
-        SET input_expires_at = NULL,
-            extracted_text = CASE WHEN EXISTS (
-                SELECT 1 FROM analysis_jobs AS job
-                JOIN reports AS report ON report.job_id = job.id
-                WHERE job.document_id = document.id AND report.expires_at > now()
-            ) THEN document.extracted_text ELSE NULL END
-        WHERE document.storage_path IS NULL
-          AND document.input_expires_at IS NOT NULL
-          AND document.input_expires_at < now()
-        "#,
-    )
-    .execute(pool)
-    .await?;
+    let mut targets = Vec::new();
+    for document_id in documents {
+        let mut transaction = pool.begin().await?;
+        // Use the same job -> document ordering as terminal transitions. Retry
+        // cannot change a failed job to queued during source/chunk removal.
+        let _locked_jobs = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM analysis_jobs WHERE document_id = $1 ORDER BY id FOR UPDATE",
+        )
+        .bind(document_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let path = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT storage_path FROM documents WHERE id = $1 AND input_expires_at < clock_timestamp() FOR UPDATE",
+        )
+        .bind(document_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(path) = path else {
+            transaction.rollback().await?;
+            continue;
+        };
+        // Creation locks the document first, so re-read after acquiring it:
+        // a newly committed job may not have existed in the initial job set.
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM analysis_jobs WHERE document_id = $1 AND status NOT IN ('completed','failed','cancelled','expired'))",
+        )
+        .bind(document_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active {
+            transaction.rollback().await?;
+            continue;
+        }
+        sqlx::query(
+            r#"
+            UPDATE analysis_chunks AS chunk
+            SET content = NULL, candidate_output = NULL, verifier_output = NULL,
+                updated_at = now()
+            FROM analysis_jobs AS job
+            WHERE chunk.job_id = job.id AND job.document_id = $1
+            "#,
+        )
+        .bind(document_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE documents AS document
+            SET extracted_text = CASE WHEN EXISTS (
+                    SELECT 1 FROM analysis_jobs AS job
+                    JOIN reports AS report ON report.job_id = job.id
+                    WHERE job.document_id = document.id AND report.expires_at > now()
+                ) THEN document.extracted_text ELSE NULL END,
+                input_expires_at = CASE WHEN document.storage_path IS NULL
+                    THEN NULL ELSE document.input_expires_at END
+            WHERE document.id = $1
+            "#,
+        )
+        .bind(document_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        if let Some(path) = path {
+            targets.push(CleanupTarget::Document(PathBuf::from(path)));
+        }
+    }
     let reports: Vec<(Uuid, Option<String>)> =
         sqlx::query_as("SELECT id, pdf_path FROM reports WHERE expires_at < now()")
             .fetch_all(pool)
             .await?;
-    let mut targets: Vec<CleanupTarget> = paths
-        .into_iter()
-        .flatten()
-        .map(|path| CleanupTarget::Document(PathBuf::from(path)))
-        .collect();
     targets.extend(reports.into_iter().map(|(id, path)| CleanupTarget::Report {
         id,
         path: path.map(PathBuf::from),
@@ -1426,6 +1441,120 @@ mod tests {
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+
+    struct ActiveInputFixture {
+        user_id: Uuid,
+        document_id: Uuid,
+        job_id: Uuid,
+    }
+
+    impl ActiveInputFixture {
+        async fn create(pool: &PgPool, status: &str) -> Self {
+            let user_id = Uuid::new_v4();
+            let profile_id = Uuid::new_v4();
+            let document_id = Uuid::new_v4();
+            let job_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO users(id, username, password_hash, role) VALUES($1,$2,'unused','user')")
+                .bind(user_id).bind(format!("retention-{user_id}"))
+                .execute(pool).await.unwrap();
+            sqlx::query("INSERT INTO model_profiles(id, owner_id, name, base_url, api_key_ciphertext, candidate_model, verifier_model, disclosure_accepted_at) VALUES($1,$2,'test','https://example.test',decode('00','hex'),'test','test',now())")
+                .bind(profile_id).bind(user_id).execute(pool).await.unwrap();
+            sqlx::query("INSERT INTO documents(id, user_id, original_name, media_type, document_format, size_bytes, storage_path, extracted_text, input_expires_at) VALUES($1,$2,'test.txt','text/plain','txt',6,$3,'正文',now() - interval '1 minute')")
+                .bind(document_id).bind(user_id).bind(format!("/tmp/{document_id}.txt"))
+                .execute(pool).await.unwrap();
+            sqlx::query("INSERT INTO analysis_jobs(id, user_id, document_id, model_profile_id, status, analyzer_version, timeout_at) VALUES($1,$2,$3,$4,$5,'test',now() + interval '1 hour')")
+                .bind(job_id).bind(user_id).bind(document_id).bind(profile_id).bind(status)
+                .execute(pool).await.unwrap();
+            sqlx::query("INSERT INTO analysis_chunks(id, job_id, chunk_index, source_start, source_end, content, candidate_output, verifier_output) VALUES($1,$2,0,0,2,'正文','{}','{}')")
+                .bind(Uuid::new_v4()).bind(job_id).execute(pool).await.unwrap();
+            Self {
+                user_id,
+                document_id,
+                job_id,
+            }
+        }
+
+        async fn assert_retained(&self, pool: &PgPool, targets: &[CleanupTarget]) {
+            let source: (Option<String>, Option<String>, bool) = sqlx::query_as(
+                "SELECT storage_path, extracted_text, input_expires_at IS NOT NULL FROM documents WHERE id = $1",
+            ).bind(self.document_id).fetch_one(pool).await.unwrap();
+            assert!(source.0.is_some());
+            assert_eq!(source.1.as_deref(), Some("正文"));
+            assert!(source.2);
+            assert!(!targets.iter().any(|target| matches!(target, CleanupTarget::Document(path) if Some(path.to_string_lossy().as_ref()) == source.0.as_deref())));
+            let intact: bool = sqlx::query_scalar(
+                "SELECT content IS NOT NULL AND candidate_output IS NOT NULL AND verifier_output IS NOT NULL FROM analysis_chunks WHERE job_id = $1",
+            ).bind(self.job_id).fetch_one(pool).await.unwrap();
+            assert!(intact);
+        }
+
+        async fn remove(self, pool: &PgPool) {
+            sqlx::query("DELETE FROM analysis_jobs WHERE user_id = $1")
+                .bind(self.user_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_active_inputs_keep_files_source_and_chunk_outputs() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let mut fixtures = Vec::new();
+        for status in [
+            "queued",
+            "extracting",
+            "analyzing",
+            "verifying",
+            "merging",
+            "rendering",
+            "cancel_requested",
+        ] {
+            fixtures.push(ActiveInputFixture::create(&pool, status).await);
+        }
+        let targets = cleanup_expired(&pool).await.unwrap();
+        for fixture in fixtures {
+            fixture.assert_retained(&pool, &targets).await;
+            fixture.remove(&pool).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_rechecks_status_after_a_concurrent_retry_releases_the_job_lock() {
+        let Ok(database_url) = std::env::var("TEXTCOMB_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let fixture = ActiveInputFixture::create(&pool, "failed").await;
+        let mut retry = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM analysis_jobs WHERE id = $1 FOR UPDATE")
+            .bind(fixture.job_id)
+            .execute(&mut *retry)
+            .await
+            .unwrap();
+        let cleanup = {
+            let pool = pool.clone();
+            tokio::spawn(async move { cleanup_expired(&pool).await.unwrap() })
+        };
+        tokio::task::yield_now().await;
+        sqlx::query("UPDATE analysis_jobs SET status = 'queued' WHERE id = $1")
+            .bind(fixture.job_id)
+            .execute(&mut *retry)
+            .await
+            .unwrap();
+        retry.commit().await.unwrap();
+        let targets = cleanup.await.unwrap();
+        fixture.assert_retained(&pool, &targets).await;
+        fixture.remove(&pool).await;
+    }
 
     #[tokio::test]
     async fn expired_failed_input_drops_body_but_active_report_keeps_its_source() {
