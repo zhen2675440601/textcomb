@@ -368,19 +368,19 @@ mod tests {
     #[ignore = "requires Typst 0.14.2, Poppler and cmark; explicitly run by export verification"]
     async fn literal_report_values_survive_exports() {
         let values = [
-            "file@missing *literal* _name_ <label>.txt",
+            "file@missing *literal* _name_ <label>𠀀.txt",
             "provider_*_<provider>@provider",
             "candidate_*_<candidate>@candidate",
             "verifier_*_<verifier>@verifier",
             "prompt_*_<prompt>@prompt",
             "reference_*_<reference>@reference",
             "analyzer_*_<analyzer>@analyzer",
-            "原文 @missing_reference *literal* _literal_ <synthetic-label> [内容] $公式$ #代码 `代码` &amp; \\\n第二行",
+            "原文 @missing_reference *literal* _literal_ <synthetic-label> [内容] $公式$ #代码 `代码` &amp; \\\n第二行 🧪",
             "reason @reason *reason* _reason_ <reason> \"quoted\"",
-            "suggestion @suggestion *suggestion* _suggestion_ <suggestion>",
+            "suggestion @suggestion *suggestion* _suggestion_ <suggestion> 删除此处的“🧪”，保留𠀀",
             "evidence @evidence *evidence* _evidence_ <evidence>",
             "revision @revision *revision* _revision_ <revision>",
-            "miss @miss *miss* _miss_ <miss>",
+            "miss @miss *miss* _miss_ <miss> 👩‍💻 ❤️",
             "note @note *note* _note_ <note>",
         ];
         let report: ReportV1 = serde_json::from_value(serde_json::json!({
@@ -452,6 +452,10 @@ mod tests {
             .expect("literal report PDF renders");
         assert!(!source.exists(), "temporary report source must be removed");
         let extracted = Command::new("pdftotext")
+            // Content-stream order preserves adjacent text from fonts with
+            // different glyph bounds; Poppler's default line sorting can
+            // move color Emoji before the surrounding Chinese text.
+            .arg("-raw")
             .arg(&pdf)
             .arg("-")
             .output()
