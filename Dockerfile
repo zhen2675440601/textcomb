@@ -23,6 +23,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     install -Dm755 target/release/textcomb-cli /out/textcomb-cli
 
 FROM rust-source AS test
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends poppler-utils && \
+    rm -rf /var/lib/apt/lists/*
+COPY tests ./tests
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo clean -p textcomb-api -p textcomb-cli -p textcomb-worker \

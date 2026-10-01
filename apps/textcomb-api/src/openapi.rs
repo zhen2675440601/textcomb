@@ -346,7 +346,8 @@ async fn specification() -> Json<Value> {
                             "content": { "application/json": {
                                 "schema": { "$ref": "#/components/schemas/ModelProfile" }
                             } }
-                        }
+                        },
+                        "409": { "$ref": "#/components/responses/Problem" }
                     }
                 }
             },
@@ -374,7 +375,8 @@ async fn specification() -> Json<Value> {
                                 "schema": { "$ref": "#/components/schemas/ModelProfile" }
                             } }
                         },
-                        "404": { "$ref": "#/components/responses/Problem" }
+                        "404": { "$ref": "#/components/responses/Problem" },
+                        "409": { "$ref": "#/components/responses/Problem" }
                     }
                 }
             },
