@@ -17,7 +17,13 @@ python -B -m unittest discover -s tools/release -p 'test_*.py'
 python -B tools/release/prepare.py --version v0.1.0-alpha.1 --commit FULL_SHA --checks ../candidate-checks.json --output private-evaluation/release-candidate
 ```
 
-脚本要求工作树干净、当前 HEAD 与目标 SHA 相同、目标在 `origin/main` 历史内且产品版本一致。它核对 GitHub Actions 七个必需检查，拒绝已跳过或失败的结果。来源包只包含该提交的 Git 跟踪文件，阻止 `.env`、评测目录和构建目录；压缩时间固定为 0，同一提交/版本可重复生成相同源码校验和。检查 JSON 是可信 API 输入，离线手写的 JSON 不能作为发布证据。Docker 构建保留依赖缓存，但先清理本工作区产物，避免不同分支 COPY 文件的时间戳导致复用旧项目二进制。
+脚本要求工作树干净、当前 HEAD 与目标 SHA 相同、目标在 `origin/main` 历史内且产品版本一致。它核对 GitHub Actions 七个必需检查，拒绝已跳过或失败的结果。检查 JSON 是可信 API 输入，离线手写的 JSON 不能作为发布证据。
+
+源码包采用 Git 的 NUL 分隔路径，按 POSIX 路径检查整个提交，禁止任何层级的 `.env` 与 `.env.*` 实际配置；只允许明确的 `.env.example` 和 `.env.compose.example` 模板名。递归保留目录规则禁止 `private-evaluation`、`data`、`uploads`、`tmp`、`logs`、`backups`、`.sqlx`、`target`、`node_modules`、`dist`、`build`、`__pycache__` 和 `coverage`，并拒绝 `.log`、`.tmp`、`.dump`、`.backup`、`.pyc`、`.pyo` 文件。可再分发的 TXT、PDF、DOCX 测试样例正常保留；环境模板必须使用占位值，模板名和路径检查不能证明文件内容不含密钥或私有正文，仍须维护者审核。当前源码包不支持符号链接或子模块，遇到这些条目会失败，而不会静默遗漏或跟随外部文件。路径必须为 UTF-8，不能含控制字符、反斜杠或冒号。
+
+脚本也检查实际 tar 的文件集和 Git blob 内容；`export-ignore` 隐藏文件或 `export-subst` 改写内容会被拒绝。归档在临时裸仓库中只读共享源对象库，仅使用目标提交的属性；主机的系统/全局 Git 配置、全局属性、未跟踪的 `.git/info/attributes` 及 Git 环境覆盖不会影响归档，也不会改写原仓库配置。仅目标提交明确的 `eol=crlf` 且非 `-text` 属性允许 CRLF 表示转换；其他内容必须与 Git blob 相同。固定 tar 权限掩码和换行设置，压缩时间固定为 0，同一提交/版本可重复生成相同源码校验和。每次须使用尚不存在的输出目录：源码包、`SHA256SUMS` 和 `candidate.json` 在同级临时目录全部写入成功后才一起移入目标目录，失败不会留下半个成功候选包，也不会覆盖旧版证据。
+
+Docker 构建保留依赖缓存，但先清理本工作区产物，避免不同分支 COPY 文件的时间戳导致复用旧项目二进制。
 
 ## 维护者最终审阅
 
