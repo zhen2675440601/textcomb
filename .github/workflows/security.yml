@@ -16,17 +16,21 @@ jobs:
   rust:
     name: Rust dependency audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
       - name: Install pinned lockfile scanner
+        if: ${{ !cancelled() }}
         run: cargo install cargo-audit --version 0.22.2 --locked --no-default-features
-      - name: Record RSA feature exposure
-        run: cargo tree --locked --workspace --all-features --target all --invert rsa > rsa-dependency-paths.txt 2>&1
-      - name: Audit Rust dependencies
-        run: cargo audit --json > rust-audit.json
+      - name: Verify independent audit and exposure handling
+        if: ${{ !cancelled() }}
+        run: python3 -B -m unittest discover -s tools/security -v
+      - name: Independently record exposure and audit Rust dependencies
+        if: ${{ !cancelled() }}
+        run: python3 -B tools/security/rust_audit.py
       - name: Retain scan evidence even when vulnerabilities fail the job
         if: always()
         uses: actions/upload-artifact@v4
@@ -34,11 +38,16 @@ jobs:
           name: rust-security-${{ github.run_id }}
           path: |
             rust-audit.json
+            rust-audit-stderr.txt
+            rust-audit-config.toml
             rsa-dependency-paths.txt
+            rsa-exposure.json
+            rust-security-status.json
           retention-days: 14
   web:
     name: Frontend dependency audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
