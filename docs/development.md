@@ -91,3 +91,9 @@ npm run build
 ```
 
 真实 AI 评测不在普通 PR 中运行。评测流程见 [`evaluation.md`](evaluation.md)。
+
+## PostgreSQL 依赖与嵌入迁移
+
+SQLx 主库、core 和 PostgreSQL 驱动固定为同一版本。UUID、时间、JSON 和迁移功能直接在 PostgreSQL 驱动启用，避免通用功能开关将未使用的 MySQL/RSA 或 SQLite 带进锁文件。新增 SQLx 功能或升级版本后，使用 Cargo 更新锁文件，并运行 `python3 -B -m unittest discover -s tools/security -v` 和完整 Rust 安全审计；不要手工移除依赖记录。
+
+`textcomb-core/build.rs` 使用 SQLx 的官方目录解析器，将 `migrations/` 下的前滚 SQL 嵌入二进制。新增或修改文件会触发重新编译；运行镜像不依赖源码目录。运行时仍由 SQLx Migrator 执行事务、数据库锁、校验和与历史验证，不能修改已应用的迁移来消除校验失败。CI 在真实 PostgreSQL 上验证重复迁移、与目录解析器的兼容以及校验和和未知版本的拒绝行为。

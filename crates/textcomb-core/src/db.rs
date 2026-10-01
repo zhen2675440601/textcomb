@@ -181,7 +181,9 @@ pub async fn connect(database_url: &str) -> CoreResult<PgPool> {
 }
 
 pub async fn migrate(pool: &PgPool) -> CoreResult<()> {
-    sqlx::migrate!("../../migrations")
+    crate::migrations::migrator()
+        .await
+        .map_err(|error| CoreError::Internal(anyhow::Error::new(error)))?
         .run(pool)
         .await
         .map_err(|error| CoreError::Internal(anyhow::Error::new(error)))?;
