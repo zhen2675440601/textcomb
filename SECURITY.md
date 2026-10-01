@@ -16,7 +16,7 @@ Rust 检查用 `Cargo.lock` 确定是否仍有 RSA，并用 `cargo metadata --lo
 
 `cargo audit` 在临时工作目录使用明确、未过滤的审计配置，固定官方 RustSec 公告库，扫描原始锁文件；项目和用户的 `audit.toml` 不参与扫描。配置与结果一并保留。成功结果还必须含固定扫描器的完整设置：没有忽略列表、CVSS 级别或架构/系统过滤，并包含全部默认信息类公告；缺失或改变设置、漏洞数量不一致均拒绝通过。回归用真实扫描器和本地合成公告库证明项目过滤配置不能把检查变绿。
 
-当前已知锁文件公告：[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)，影响 `rsa 0.9.10`。它来自 SQLx 的可选 MySQL 依赖；当前仅启用 PostgreSQL，`cargo tree --locked --workspace --all-features --target all --invert rsa` 没有活动依赖路径。这限定了已观察到的暴露范围，不能消除锁文件公告。工作流保存实际依赖图并保留失败结果；引入 MySQL、RSA 或改变 SQLx 特性后必须重新审查。上游当前没有修复版本，升级到任意新版本不能代替核对公告。稳定发布前需要维护者明确处置该公告，不能把失败扫描写成通过。
+SQLx 的通用类型与迁移功能开关曾将可选 MySQL 驱动和 `rsa 0.9.10` 带入锁文件，触发 [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)。项目现在仅在 PostgreSQL 驱动上启用 UUID、时间、JSON 和迁移功能；SQLx 主库保留 Tokio、TLS、PostgreSQL 与派生宏，构建阶段使用 SQLx 官方解析器嵌入前滚迁移。RSA、MySQL 和 SQLite 已从 Cargo 重新解析的锁文件中移除，没有忽略公告或手工删除锁文件条目。回归测试禁止这些无用驱动重新出现，并验证迁移内容、校验和、已有数据库兼容与历史漂移拒绝。每次修改依赖仍须运行完整审计，不能沿用本次通过结果。
 
 项目的安全边界包括：
 

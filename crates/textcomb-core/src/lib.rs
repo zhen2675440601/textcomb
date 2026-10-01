@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod db;
 pub mod documents;
 pub mod error;
+mod migrations;
 mod model_limits;
 pub mod prompts;
 pub mod provider;

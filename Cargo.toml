@@ -44,16 +44,16 @@ secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = [
+# Enable type and migration features on the PostgreSQL driver itself. SQLx's
+# umbrella weak features otherwise resolve unused MySQL/RSA dependencies.
+sqlx = { version = "=0.8.6", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls-ring-native-roots",
     "postgres",
-    "uuid",
-    "time",
-    "json",
-    "migrate",
-    "macros",
+    "derive",
 ] }
+sqlx-core = { version = "=0.8.6", default-features = false, features = ["migrate"] }
+sqlx-postgres = { version = "=0.8.6", default-features = false, features = ["uuid", "time", "json", "migrate"] }
 tempfile = "3.23"
 textcomb-domain = { path = "crates/textcomb-domain" }
 textcomb-core = { path = "crates/textcomb-core" }
