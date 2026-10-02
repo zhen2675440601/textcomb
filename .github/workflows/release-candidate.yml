@@ -47,7 +47,7 @@ jobs:
             --version "$CANDIDATE_VERSION" --commit "$CANDIDATE_COMMIT" \
             --checks "$RUNNER_TEMP/candidate-checks.json" \
             --output private-evaluation/release-candidate
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-candidate-${{ inputs.commit }}
           path: private-evaluation/release-candidate/
