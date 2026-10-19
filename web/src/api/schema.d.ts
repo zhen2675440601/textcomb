@@ -217,6 +217,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/analyses/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 当前用户的分析历史，按创建时间和 ID 降序稳定分页。统计覆盖该用户全部任务，不受搜索与筛选影响。 */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    page_size?: number;
+                    /** @description 文章名，不区分大小写；% 和 _ 按字面匹配 */
+                    q?: string;
+                    status?: "all" | "active" | "completed" | "failed" | "cancelled" | "expired";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description 历史分页及真实总数 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AnalysisHistoryPage"];
+                    };
+                };
+                422: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/analyses/{id}": {
         parameters: {
             query?: never;
@@ -1150,6 +1193,28 @@ export interface components {
             started_at: string | null;
             status: string;
             total_chunks: number;
+        };
+        AnalysisHistoryItem: components["schemas"]["Analysis"] & {
+            /** @enum {string} */
+            document_format: "txt" | "docx" | "pdf";
+            original_name: string;
+        };
+        AnalysisHistoryPage: {
+            items: components["schemas"]["AnalysisHistoryItem"][];
+            page: number;
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+            totals: {
+                /** Format: int64 */
+                active: number;
+                /** Format: int64 */
+                completed: number;
+                /** Format: int64 */
+                failed: number;
+                /** Format: int64 */
+                total: number;
+            };
         };
         AnalysisSnapshot: {
             /** @enum {string} */

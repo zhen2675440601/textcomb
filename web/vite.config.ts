@@ -2,6 +2,8 @@ import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 
+const apiOrigin = process.env.TEXTCOMB_API_ORIGIN ?? "http://localhost:3000";
+
 export default defineConfig({
   plugins: [vue()],
   resolve: {
@@ -14,11 +16,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:3000",
+        target: apiOrigin,
         changeOrigin: true,
       },
       "/healthz": {
-        target: "http://localhost:3000",
+        target: apiOrigin,
       },
     },
   },

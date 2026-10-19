@@ -66,6 +66,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Browser workflow regressions
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
 
   migrations:
     runs-on: ubuntu-24.04
@@ -116,6 +120,8 @@ jobs:
         run: cargo test --locked -p textcomb-api deletion_
       - name: Verify model profile name conflicts against PostgreSQL
         run: cargo test --locked -p textcomb-api model_profile_name_tests
+      - name: Verify history pagination, search and user isolation
+        run: cargo test --locked -p textcomb-api history_
 
   container:
     runs-on: ubuntu-24.04
@@ -150,7 +156,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Start the deployable stack
-        run: docker compose up -d --build
+        run: docker compose -f compose.yaml -f compose.dev.yaml --profile dev up -d --build
       - name: Smoke test and verify generated OpenAPI types
         run: |
           for attempt in $(seq 1 60); do
@@ -168,6 +174,14 @@ jobs:
           npm --prefix web ci --ignore-scripts
           npm --prefix web run generate:api
           git diff --exit-code -- web/src/api/schema.d.ts
+      - name: Browser end-to-end flow against the real fake-model stack
+        env:
+          TEXTCOMB_E2E_BASE_URL: http://localhost:3000
+          TEXTCOMB_E2E_LIVE: "1"
+        run: |
+          docker compose --profile tools run --rm cli bootstrap-admin --username e2e-admin --password textcomb-e2e-test-only
+          npm --prefix web exec -- playwright install --with-deps chromium
+          npm --prefix web run test:e2e -- --grep 'real fake-model'
       - name: Stop smoke-test stack
         if: always()
-        run: docker compose down -v --remove-orphans
+        run: docker compose -f compose.yaml -f compose.dev.yaml --profile dev down -v --remove-orphans

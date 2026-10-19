@@ -114,7 +114,7 @@ async function signOut() {
         </RouterLink>
       </header>
       <div class="page-content">
-        <RouterView />
+        <RouterView :key="route.path" />
       </div>
     </main>
     <button

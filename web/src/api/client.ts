@@ -3,6 +3,8 @@ import type {
   SystemStatus,
   Analysis,
   AnalysisProfile,
+  AnalysisHistoryPage,
+  HistoryFilter,
   DocumentRecord,
   FeedbackVerdict,
   IssueCategory,
@@ -85,7 +87,11 @@ export const api = {
     request<void>(`/documents/${id}`, { method: "DELETE" }),
 
   analyses: () => request<Analysis[]>("/analyses"),
-  analysis: (id: string) => request<Analysis>(`/analyses/${id}`),
+  analysisHistory: (page: number, status: HistoryFilter, q: string, signal?: AbortSignal) =>
+    request<AnalysisHistoryPage>(`/analyses/history?${new URLSearchParams({
+      page: String(page), page_size: "20", status, q,
+    })}`, { signal }),
+  analysis: (id: string, signal?: AbortSignal) => request<Analysis>(`/analyses/${id}`, { signal }),
   deleteAnalysis: (id: string) =>
     request<void>(`/analyses/${id}`, { method: "DELETE" }),
   createAnalysis: (

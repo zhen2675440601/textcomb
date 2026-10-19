@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { api, ApiProblem, uploadDocument } from "@/api/client";
 import type { AnalysisProfile, DocumentRecord, ModelProfile } from "@/api/types";
 
@@ -8,6 +8,8 @@ type SourceMode = "file" | "text";
 
 const MAX_TEXT_CHARS = 200_000;
 const router = useRouter();
+const route = useRoute();
+const exampleText = "今天我们讨论如何把文章写得更清楚。通过这次交流，使我们认识到认真校对的重要性。\n\n这段示例用于熟悉检查、原文定位和审核流程，不代表模型的实际准确率。";
 const input = ref<HTMLInputElement>();
 const selectedFile = ref<File | null>(null);
 const sourceMode = ref<SourceMode>("file");
@@ -110,7 +112,8 @@ async function startAnalysis() {
 async function loadProfiles() {
   try {
     profiles.value = await api.modelProfiles();
-    const first = profiles.value.find((profile) => profile.enabled);
+    const first = profiles.value.find((profile) => profile.enabled && profile.id === route.query.profile)
+      ?? profiles.value.find((profile) => profile.enabled);
     selectedProfileId.value = first?.id ?? "";
   } catch (cause) {
     error.value = cause instanceof ApiProblem ? cause.message : "无法读取模型配置";
@@ -119,7 +122,14 @@ async function loadProfiles() {
   }
 }
 
-onMounted(loadProfiles);
+function fillExample() {
+  if (pastedText.value.trim() && !window.confirm("用示例正文替换当前粘贴的内容吗？")) return;
+  sourceMode.value = "text";
+  pastedText.value = exampleText;
+  error.value = "";
+}
+
+onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfiles(); });
 </script>
 
 <template>
@@ -131,6 +141,12 @@ onMounted(loadProfiles);
         <p>原文件仅用于本次分析。成功、取消或主动删除后会立即清除。</p>
       </div>
 
+      <div v-if="!loadingProfiles && !usableProfiles.length" class="card setup-guide">
+        <h3>先连接一个模型服务</h3>
+        <p>保存配置并测试连接后，就可以检查文章；也可以先填入示例，了解操作步骤。</p>
+        <RouterLink class="button primary compact" to="/models">连接模型并测试</RouterLink>
+      </div>
+
       <div v-if="error" class="alert error" role="alert">{{ error }}</div>
 
       <section class="card form-card">
@@ -139,6 +155,7 @@ onMounted(loadProfiles);
           <div>
             <h3>添加文章</h3>
             <p>上传文件，或直接粘贴正文；粘贴内容将按 TXT 文章处理。</p>
+            <button class="text-button" type="button" :disabled="submitting" @click="fillExample">填入示例正文</button>
           </div>
         </div>
 
@@ -218,7 +235,7 @@ onMounted(loadProfiles);
           <span>02</span>
           <div>
             <h3>选择文章场景</h3>
-            <p>场景只影响长文本保护策略，不改变问题分类。</p>
+            <p>根据文章类型，减少公式、引用和数字被误报的情况。</p>
           </div>
         </div>
         <label class="field">

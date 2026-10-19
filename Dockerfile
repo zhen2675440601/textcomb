@@ -12,6 +12,7 @@ COPY apps ./apps
 COPY tools/textcomb-eval ./tools/textcomb-eval
 
 FROM rust-source AS rust-builder
+ARG CARGO_BUILD_JOBS=2
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo clean --release -p textcomb-api -p textcomb-cli -p textcomb-worker \

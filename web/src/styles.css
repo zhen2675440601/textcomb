@@ -2595,6 +2595,30 @@ svg {
   }
 }
 
+.history-search, .history-pagination, .review-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.history-search .field { flex: 1; min-width: 180px; }
+.history-pagination { justify-content: flex-end; }
+.history-pagination > span { margin-right: auto; }
+.segmented { flex-wrap: wrap; }
+.setup-guide { padding: 22px; }
+.setup-guide h3 { margin-top: 0; }
+.setup-guide ol { padding-left: 22px; line-height: 1.9; }
+.setup-guide p { color: var(--muted); line-height: 1.7; }
+.setup-guide .button + .button { margin-left: 8px; }
+.model-advanced { margin: 18px 0; }
+.model-advanced summary { cursor: pointer; font-weight: 600; margin-bottom: 16px; }
+.review-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 14px; padding: 20px; }
+.review-toolbar > small { grid-column: 1 / -1; }
+.review-toolbar .mini-progress { margin-top: 10px; }
+.review-selected { outline: 2px solid var(--forest); outline-offset: 2px; scroll-margin-top: 24px; }
+.progress-timing { font-variant-numeric: tabular-nums; }
+@media (max-width: 860px) { .review-toolbar { grid-template-columns: 1fr; } }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

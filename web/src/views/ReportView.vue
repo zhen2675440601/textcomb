@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api, ApiProblem } from "@/api/client";
 import { formatSourceLocation } from "@/utils/source-location";
+import { acceptsReviewShortcut, adjacentIssue, nextUnreviewed } from "@/utils/review-navigation";
+import { useAuth } from "@/state/auth";
 import type {
   FeedbackVerdict,
   Issue,
@@ -36,9 +38,16 @@ const missedCategory = ref<IssueCategory>("grammar");
 const missedNote = ref("");
 const missedError = ref("");
 const savingMiss = ref(false);
+const autoAdvance = ref(true);
+const restoredPosition = ref(false);
 let sourceRequestVersion = 0;
 
 const reportId = String(route.params.id);
+const auth = useAuth();
+const positionKey = `textcomb.review.v1:${auth.user.value?.id}:${reportId}`;
+const reviewedCount = computed(() => report.value?.issues.filter((issue) => issue.feedback).length ?? 0);
+const reviewPercent = computed(() => report.value?.issues.length ? Math.round(reviewedCount.value / report.value.issues.length * 100) : 100);
+const nextPending = computed(() => nextUnreviewed(visibleIssues.value, selectedIssueId.value));
 
 const categoryLabels: Record<IssueCategory, string> = {
   typo: "错字",
@@ -115,17 +124,62 @@ async function load() {
   error.value = "";
   try {
     report.value = await api.report(reportId);
-    const first = report.value.issues[0];
+    let position: { id?: string; sourceOpen?: boolean } | null = null;
+    try { position = JSON.parse(localStorage.getItem(positionKey) ?? "null"); } catch { /* Storage is optional. */ }
+    const saved = report.value.issues.find((issue) => issue.id === position?.id);
+    const first = saved ?? report.value.issues[0];
     if (first) {
       expanded.value.add(first.id);
       selectedIssueId.value = first.id;
+      restoredPosition.value = Boolean(saved);
+      if (position?.sourceOpen === true) void openSource(first);
     }
   } catch (cause) {
     error.value = cause instanceof ApiProblem ? cause.message : "无法读取问题报告";
   } finally {
     loading.value = false;
+    if (restoredPosition.value) void nextTick(scrollToIssue);
   }
 }
+
+function scrollToIssue() {
+  if (selectedIssueId.value) document.getElementById(`issue-${selectedIssueId.value}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function selectIssue(issue: Issue) {
+  selectedIssueId.value = issue.id;
+  expanded.value = new Set([issue.id]);
+  if (sourceOpen.value) void openSource(issue);
+  void nextTick(scrollToIssue);
+}
+
+function moveIssue(direction: -1 | 1) {
+  const issue = adjacentIssue(visibleIssues.value, selectedIssueId.value, direction);
+  if (issue) selectIssue(issue);
+}
+
+function reviewNext() { if (nextPending.value) selectIssue(nextPending.value); }
+
+function shortcut(event: KeyboardEvent) {
+  if (!acceptsReviewShortcut(event)) return;
+  const key = event.key.toLowerCase();
+  if (!["j", "k", "n", "1", "2", "3"].includes(key)) return;
+  const issue = visibleIssues.value.find((item) => item.id === selectedIssueId.value);
+  event.preventDefault();
+  if (key === "j") moveIssue(1);
+  else if (key === "k") moveIssue(-1);
+  else if (key === "n") reviewNext();
+  else if (issue && !sendingFeedback.value) {
+    const verdict = ({ "1": "correct", "2": "incorrect", "3": "disputed" } as const)[key as "1" | "2" | "3"];
+    void setFeedback(issue, verdict);
+  }
+}
+
+watch([selectedIssueId, sourceOpen], () => {
+  if (!report.value) return;
+  // Retain only IDs and a view preference, never article text or suggestions.
+  try { localStorage.setItem(positionKey, JSON.stringify({ id: selectedIssueId.value, sourceOpen: sourceOpen.value })); } catch { /* Storage may be unavailable. */ }
+});
 
 function toggle(issue: Issue) {
   selectedIssueId.value = issue.id;
@@ -276,11 +330,14 @@ function locationLabel(issue: Issue) {
 }
 
 async function setFeedback(issue: Issue, verdict: FeedbackVerdict) {
+  if (sendingFeedback.value) return;
+  const next = nextUnreviewed(visibleIssues.value, issue.id);
   sendingFeedback.value = issue.id;
   error.value = "";
   try {
     await api.feedback(issue.id, verdict);
     issue.feedback = verdict;
+    if (autoAdvance.value && next) selectIssue(next);
   } catch (cause) {
     error.value = cause instanceof ApiProblem ? cause.message : "反馈保存失败";
   } finally {
@@ -292,6 +349,7 @@ async function removeReport() {
   if (!window.confirm("确定永久删除这份报告吗？分析原文、问题片段和 PDF 将不可恢复。")) return;
   try {
     await api.deleteReport(reportId);
+    try { localStorage.removeItem(positionKey); } catch { /* Storage is optional. */ }
     await router.replace("/analyses");
   } catch (cause) {
     error.value = cause instanceof ApiProblem ? cause.message : "删除报告失败";
@@ -305,7 +363,8 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
-onMounted(load);
+onMounted(() => { void load(); window.addEventListener("keydown", shortcut); });
+onBeforeUnmount(() => { sourceRequestVersion += 1; window.removeEventListener("keydown", shortcut); });
 </script>
 
 <template>
@@ -371,6 +430,17 @@ onMounted(load);
           <i class="category-dot paragraph" />
         </article>
       </div>
+
+      <section class="review-toolbar card" aria-label="逐条审核">
+        <div><strong>已审核 {{ reviewedCount }} / {{ report.issues.length }} 项</strong><span v-if="restoredPosition" class="muted"> · 已恢复上次阅读位置</span><div class="mini-progress"><span :style="{ width: `${reviewPercent}%` }" /></div></div>
+        <div class="review-controls">
+          <button class="button quiet compact" type="button" :disabled="!visibleIssues.length" @click="moveIssue(-1)">上一条</button>
+          <button class="button quiet compact" type="button" :disabled="!visibleIssues.length" @click="moveIssue(1)">下一条</button>
+          <button class="button primary compact" type="button" :disabled="!nextPending" @click="reviewNext">下一个未审核</button>
+        </div>
+        <label class="check-row"><input v-model="autoAdvance" type="checkbox" />标记后自动跳到下一条</label>
+        <small class="muted">快捷键：J / K 上下条 · N 下个未审核 · 1 正确 / 2 错误 / 3 有争议</small>
+      </section>
 
       <div class="report-workspace" :class="{ 'with-source': sourceOpen }">
         <aside class="filter-panel card">
@@ -439,9 +509,10 @@ onMounted(load);
           <article
             v-for="(issue, index) in visibleIssues"
             :key="issue.id"
+            :id="`issue-${issue.id}`"
             class="issue-card"
             :data-category="issue.category"
-            :class="{ expanded: expanded.has(issue.id) }"
+            :class="{ expanded: expanded.has(issue.id), 'review-selected': selectedIssueId === issue.id }"
           >
             <button class="issue-summary" type="button" @click="toggle(issue)">
               <span class="issue-number">{{ String(index + 1).padStart(2, "0") }}</span>
@@ -498,7 +569,7 @@ onMounted(load);
                   <button
                     type="button"
                     :class="{ active: issue.feedback === 'correct' }"
-                    :disabled="sendingFeedback === issue.id"
+                    :disabled="Boolean(sendingFeedback)"
                     @click="setFeedback(issue, 'correct')"
                   >
                     ✓ 正确
@@ -506,7 +577,7 @@ onMounted(load);
                   <button
                     type="button"
                     :class="{ active: issue.feedback === 'incorrect' }"
-                    :disabled="sendingFeedback === issue.id"
+                    :disabled="Boolean(sendingFeedback)"
                     @click="setFeedback(issue, 'incorrect')"
                   >
                     × 错误
@@ -514,7 +585,7 @@ onMounted(load);
                   <button
                     type="button"
                     :class="{ active: issue.feedback === 'disputed' }"
-                    :disabled="sendingFeedback === issue.id"
+                    :disabled="Boolean(sendingFeedback)"
                     @click="setFeedback(issue, 'disputed')"
                   >
                     ? 有争议
