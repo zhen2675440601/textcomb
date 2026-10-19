@@ -77,7 +77,7 @@ url = { version = "2.5", features = ["serde"] }
 utoipa = { version = "5.4", features = ["axum_extras", "time", "uuid"] }
 utoipa-axum = "0.2"
 uuid = { version = "1.18", features = ["serde", "v4", "v7"] }
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = "thin"

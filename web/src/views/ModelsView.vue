@@ -41,6 +41,7 @@ const testing = ref<string | null>(null);
 const error = ref("");
 const success = ref("");
 const showForm = ref(false);
+const readyProfileId = ref("");
 const editingProfileId = ref<string | null>(null);
 const form = reactive({
   name: "",
@@ -128,6 +129,7 @@ async function load() {
 }
 
 async function save() {
+  readyProfileId.value = "";
   saving.value = true;
   error.value = "";
   success.value = "";
@@ -172,6 +174,7 @@ async function test(profile: ModelProfile) {
   success.value = "";
   try {
     await api.testModelProfile(profile.id);
+    readyProfileId.value = profile.id;
     success.value = `“${profile.name}”的初检与复核模型均连接成功。`;
   } catch (cause) {
     error.value = cause instanceof ApiProblem ? cause.message : "模型连接测试失败";
@@ -181,6 +184,7 @@ async function test(profile: ModelProfile) {
 }
 
 async function toggle(profile: ModelProfile) {
+  if (readyProfileId.value === profile.id) readyProfileId.value = "";
   error.value = "";
   try {
     await api.setModelProfileEnabled(profile.id, !profile.enabled);
@@ -217,6 +221,13 @@ onMounted(load);
     <div v-if="error" class="alert error">{{ error }}</div>
     <div v-if="success" class="alert success">{{ success }}</div>
 
+    <section class="card setup-guide" aria-label="首次使用引导">
+      <h3>三步开始检查文章</h3>
+      <ol><li>添加配置：填写服务地址、密钥和模型名称。</li><li>测试连接：确认初检和复核都能正常返回。</li><li>分析示例：查看报告，练习原文定位和逐条审核。</li></ol>
+      <RouterLink v-if="readyProfileId" class="button primary compact" :to="`/analyses/new?example=1&profile=${readyProfileId}`">连接成功，分析示例文章 →</RouterLink>
+      <p v-else class="muted">保存后点击配置上的“测试连接”，成功后可直接分析示例。</p>
+    </section>
+
     <form v-if="showForm" class="card provider-form" @submit.prevent="save">
       <div class="form-section-title">
         <span>{{ isEditing ? "修改配置" : "新配置" }}</span>
@@ -226,14 +237,6 @@ onMounted(load);
         <label class="field">
           <span>配置名称</span>
           <input v-model="form.name" required maxlength="100" placeholder="例如：我的主力模型" />
-        </label>
-        <label class="field">
-          <span>接口格式</span>
-          <select v-model="form.provider_kind" @change="applyProviderDefaults">
-            <option v-for="option in providerOptions" :key="option.kind" :value="option.kind">
-              {{ option.label }}
-            </option>
-          </select>
         </label>
         <label class="field full">
           <span>接口地址</span>
@@ -256,8 +259,18 @@ onMounted(load);
           />
         </label>
         <label class="field">
-          <span>初检模型</span>
+          <span>模型名称</span>
           <input v-model="form.candidate_model" required placeholder="模型标识" />
+        </label>
+      </div>
+      <details class="model-advanced" :open="isEditing">
+        <summary>高级选项（接口格式、独立复核模型、并发数）</summary>
+        <div class="form-grid">
+        <label class="field">
+          <span>接口格式</span>
+          <select v-model="form.provider_kind" @change="applyProviderDefaults">
+            <option v-for="option in providerOptions" :key="option.kind" :value="option.kind">{{ option.label }}</option>
+          </select>
         </label>
         <label class="field">
           <span>复核模型（可选）</span>
@@ -267,7 +280,8 @@ onMounted(load);
           <span>最大模型并发</span>
           <input v-model.number="form.max_concurrency" type="number" min="1" max="100" />
         </label>
-      </div>
+        </div>
+      </details>
       <label v-if="auth.isAdmin.value && !isEditing" class="check-row">
         <input v-model="form.shared" type="checkbox" />
         <span>设为所有用户可用的共享配置</span>

@@ -154,6 +154,22 @@ async fn specification() -> Json<Value> {
                     }
                 }
             },
+            "/analyses/history": {
+                "get": {
+                    "tags": ["analyses"],
+                    "description": "当前用户的分析历史，按创建时间和 ID 降序稳定分页。统计覆盖该用户全部任务，不受搜索与筛选影响。",
+                    "parameters": [
+                        { "in": "query", "name": "page", "schema": { "type": "integer", "minimum": 1, "default": 1 } },
+                        { "in": "query", "name": "page_size", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } },
+                        { "in": "query", "name": "q", "schema": { "type": "string", "maxLength": 100 }, "description": "文章名，不区分大小写；% 和 _ 按字面匹配" },
+                        { "in": "query", "name": "status", "schema": { "type": "string", "enum": ["all", "active", "completed", "failed", "cancelled", "expired"], "default": "all" } }
+                    ],
+                    "responses": {
+                        "200": { "description": "历史分页及真实总数", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AnalysisHistoryPage" } } } },
+                        "422": { "$ref": "#/components/responses/Problem" }
+                    }
+                }
+            },
             "/analyses/{id}": {
                 "get": {
                     "tags": ["analyses"],
@@ -534,6 +550,31 @@ async fn specification() -> Json<Value> {
                         "created_at": { "type": "string", "format": "date-time" },
                         "started_at": { "type": ["string", "null"], "format": "date-time" },
                         "completed_at": { "type": ["string", "null"], "format": "date-time" }
+                    }
+                },
+                "AnalysisHistoryItem": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/Analysis" },
+                        { "type": "object", "required": ["original_name", "document_format"], "properties": {
+                            "original_name": { "type": "string" },
+                            "document_format": { "type": "string", "enum": ["txt", "docx", "pdf"] }
+                        } }
+                    ]
+                },
+                "AnalysisHistoryPage": {
+                    "type": "object",
+                    "required": ["items", "total", "page", "page_size", "totals"],
+                    "properties": {
+                        "items": { "type": "array", "items": { "$ref": "#/components/schemas/AnalysisHistoryItem" } },
+                        "total": { "type": "integer", "format": "int64", "minimum": 0 },
+                        "page": { "type": "integer", "minimum": 1 },
+                        "page_size": { "type": "integer", "minimum": 1, "maximum": 100 },
+                        "totals": { "type": "object", "required": ["total", "active", "completed", "failed"], "properties": {
+                            "total": { "type": "integer", "format": "int64", "minimum": 0 },
+                            "active": { "type": "integer", "format": "int64", "minimum": 0 },
+                            "completed": { "type": "integer", "format": "int64", "minimum": 0 },
+                            "failed": { "type": "integer", "format": "int64", "minimum": 0 }
+                        } }
                     }
                 },
                 "CreateModelProfile": {

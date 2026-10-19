@@ -4,6 +4,8 @@
 
 需要 Git、Docker Desktop（或 Docker Engine＋Compose）以及至少 4 GiB 可用内存。
 
+容器发布构建默认使用两个 Rust 编译任务，降低本机同时链接 API、Worker 和 CLI 时的内存峰值。内存充裕的 CI 可通过 `docker compose build --build-arg CARGO_BUILD_JOBS=4` 调整并行度。
+
 ```shell
 cp .env.compose.example .env
 docker compose up -d --build
@@ -80,6 +82,28 @@ node tools/fake-model/server.mjs
 ```
 
 在文梳中创建模型配置：地址 `http://host.docker.internal:4010/v1`（Worker 在 Docker 中时），密钥填任意非空测试值，模型名填 `fake-textcomb`。假模型只用于集成与负载测试，不能用于质量评测。
+
+## 浏览器工作流回归
+
+前端使用 Node 24。安装依赖后运行：
+
+```shell
+cd web
+npx playwright install chromium
+npm run test:e2e
+```
+
+默认启动本地测试前端，以模拟 API 检查历史分页/搜索、断线恢复、报告审核和示例引导，不访问第三方模型。`npm test` 还覆盖重连定时器清理、请求取消、过期登录停止重试及键盘输入保护。
+
+容器 CI 另在独立数据库和假模型上运行真实链路：登录、模型连接测试、提交正文、生成报告、原文定位、审核反馈和 JSON/Markdown/PDF 下载。CI 创建专用 `e2e-admin` 测试账号。手工重跑请使用独立测试 Compose 项目和端口，设置 `TEXTCOMB_E2E_BASE_URL`、`TEXTCOMB_E2E_LIVE=1`，以及该测试环境的 `TEXTCOMB_E2E_USERNAME` / `TEXTCOMB_E2E_PASSWORD`。假模型地址默认为 `http://fake-model:4010/v1`，可用 `TEXTCOMB_E2E_FAKE_MODEL_URL` 覆盖；运行 `npm run test:e2e -- --grep 'real fake-model'`。不要将这些测试账号或配置写入真实用户环境。
+
+本机前端代理可通过 `TEXTCOMB_API_ORIGIN` 指向测试后端，默认为 `http://localhost:3000`。后端的 `TEXTCOMB_PUBLIC_ORIGIN` 需与浏览器实际访问的源一致。上述工程测试不计算语言质量；参考配置仍须执行 `evaluation-preparation.md` 中的独立人工标注与两轮验收。
+
+## 历史与审核交互契约
+
+`GET /api/v1/analyses/history` 返回 `items`、搜索/状态筛选后的 `total`、有效 `page` / `page_size` 和当前用户的全量 `totals`。默认每页 20 条，最多 100 条；`q` 最多 100 字，按文章名不区分大小写匹配，`%`、`_` 和反斜线均为普通字符。`status` 支持 `all`、`active`、`completed`、`failed`、`cancelled`、`expired`，其中 `active` 包含正在取消。超出末页时返回末页；无记录时页码为 1。接口在同一数据库快照中读取计数和记录，按创建时间和 ID 降序排序，并同时返回文档名称和格式。原 `/analyses` 列表保持兼容。
+
+报告快捷键：J/K 上下条、N 下个未审核、1/2/3 正确/错误/有争议；输入框、按钮、链接、组合输入与浏览器修饰键不触发。反馈成功后才计入审核进度，可关闭自动跳转。阅读位置按账号和报告区分，浏览器仅保存问题 ID 与面板开关；存储受限时其余审核功能仍可使用。
 
 ## 提交前检查
 

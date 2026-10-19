@@ -3,6 +3,7 @@ mod analyses;
 mod auth;
 mod deletion;
 mod documents;
+mod history;
 mod models;
 mod reports;
 
@@ -28,6 +29,7 @@ pub fn router() -> Router<AppState> {
             .merge(admin::router())
             .merge(models::router())
             .merge(documents::router())
+            .merge(history::router())
             .merge(analyses::router())
             .merge(reports::router()),
     )

@@ -45,6 +45,9 @@ export type AnalysisStatus =
 
 export type AnalysisProfile = "general" | "academic" | "financial";
 
+export type AnalysisHistoryPage = components["schemas"]["AnalysisHistoryPage"];
+export type HistoryFilter = "all" | "active" | "completed" | "failed" | "cancelled" | "expired";
+
 export interface Analysis {
   id: string;
   document_id: string;
