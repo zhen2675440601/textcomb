@@ -164,6 +164,9 @@ fn is_docx(bytes: &[u8]) -> bool {
     let mut has_content_types = false;
     let mut has_document = false;
     for name in archive.file_names() {
+        let Ok(name) = name else {
+            return false;
+        };
         has_content_types |= name == "[Content_Types].xml";
         has_document |= name == "word/document.xml";
     }
@@ -227,6 +230,24 @@ mod tests {
             detect_format("a.txt", "正文".as_bytes()).unwrap(),
             DocumentFormat::Txt
         );
+    }
+
+    #[test]
+    fn docx_detection_rejects_invalid_utf8_archive_names() {
+        let bytes = include_bytes!("../../../../tests/fixtures/e2e-sample.docx");
+        assert_eq!(
+            detect_format("article.docx", bytes).unwrap(),
+            DocumentFormat::Docx
+        );
+        let mut invalid = bytes.to_vec();
+        let header = invalid
+            .windows(4)
+            .position(|signature| signature == b"PK\x01\x02")
+            .unwrap();
+        // Set the central-directory UTF-8 flag, then corrupt its filename.
+        invalid[header + 9] |= 0x08;
+        invalid[header + 46] = 0xff;
+        assert!(detect_format("article.docx", &invalid).is_err());
     }
 
     #[test]
