@@ -131,7 +131,7 @@ test("first-use model setup leads to an example that is only submitted by the us
   await page.route("**/api/v1/documents/text", (route) => { submitted = true; return route.abort(); });
   await page.goto("/models");
   await page.getByRole("button", { name: "测试连接", exact: true }).click();
-  await page.getByRole("link", { name: "连接成功，分析示例文章 →" }).click();
+  await page.getByRole("link", { name: "分析示例文章 →" }).click();
   await expect(page.getByRole("textbox", { name: "文章正文" })).not.toBeEmpty();
   expect(submitted).toBe(false);
   await page.getByRole("button", { name: "开始分析", exact: false }).click();
@@ -155,7 +155,7 @@ test("real fake-model workflow covers login, model setup, report feedback and th
   await page.getByRole("checkbox", { name: /我已了解/ }).check();
   await page.getByRole("button", { name: "保存配置", exact: true }).click();
   await page.locator(".provider-card").filter({ hasText: "Browser test" }).last().getByRole("button", { name: "测试连接", exact: true }).click();
-  await page.getByRole("link", { name: "连接成功，分析示例文章 →" }).click();
+  await page.getByRole("link", { name: "分析示例文章 →" }).click();
   await page.getByRole("textbox", { name: "文章正文" }).fill(article);
   await page.getByRole("button", { name: "开始分析", exact: false }).click();
   await expect(page).toHaveURL(/\/reports\//, { timeout: 90_000 });

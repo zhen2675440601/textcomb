@@ -73,8 +73,6 @@ async function signOut() {
       </nav>
 
       <div class="sidebar-note">
-        <span class="eyebrow">辅助校对</span>
-        <p>结论由 AI 提供，请由作者结合上下文最终确认。</p>
         <a :href="sourceUrl" target="_blank" rel="noreferrer">查看源代码（AGPL-3.0）</a>
       </div>
 
@@ -105,7 +103,6 @@ async function signOut() {
           </svg>
         </button>
         <div>
-          <p class="eyebrow">TEXTCOMB WORKSPACE</p>
           <h1>{{ pageTitle }}</h1>
         </div>
         <RouterLink v-if="route.name !== 'new-analysis'" class="button primary compact" to="/analyses/new">
