@@ -83,9 +83,7 @@ onMounted(load);
   <section class="page-stack settings-page">
     <div class="section-heading">
       <div>
-        <p class="eyebrow">ACCESS CONTROL</p>
         <h2>用户与访问</h2>
-        <p>首版关闭公开注册。由超管为每位作者创建独立账号。</p>
       </div>
       <button class="button primary" type="button" @click="showCreate = !showCreate">
         {{ showCreate ? "取消" : "创建用户" }}
@@ -99,17 +97,16 @@ onMounted(load);
       <article class="stat-card featured">
         <span class="stat-label">系统状态</span>
         <strong>{{ systemStatus.database === "ready" ? "正常" : "异常" }}</strong>
-        <p>{{ systemStatus.active_workers }} 个 Worker 正在持有任务租约。</p>
+        <p>工作进程 {{ systemStatus.active_workers }}</p>
       </article>
       <article class="stat-card">
         <span class="stat-label">等待 / 处理中</span>
         <strong>{{ systemStatus.queued_jobs }} / {{ systemStatus.active_jobs }}</strong>
-        <p>队列和当前处理中的分析任务。</p>
       </article>
       <article class="stat-card">
         <span class="stat-label">近 24 小时失败</span>
         <strong>{{ systemStatus.failed_jobs_last_24h }}</strong>
-        <p>当前保留 {{ systemStatus.retained_reports }} 份未过期报告。</p>
+        <p>报告 {{ systemStatus.retained_reports }}</p>
       </article>
     </div>
 
@@ -181,11 +178,6 @@ onMounted(load);
           </tr>
         </tbody>
       </table>
-    </div>
-
-    <div class="security-strip">
-      <span>账号原则</span>
-      <p>禁止多人共享超管账号。重置密码会立即删除该用户已有会话。</p>
     </div>
   </section>
 </template>

@@ -8,7 +8,6 @@ interface ProviderOption {
   kind: ProviderKind;
   label: string;
   defaultBaseUrl: string;
-  endpointHint: string;
 }
 
 const providerOptions: ProviderOption[] = [
@@ -16,19 +15,16 @@ const providerOptions: ProviderOption[] = [
     kind: "openai_responses",
     label: "OpenAI Responses",
     defaultBaseUrl: "https://api.openai.com/v1",
-    endpointHint: "将在地址后使用 /responses，并以 Bearer 密钥认证。",
   },
   {
     kind: "openai_compatible",
     label: "OpenAI Compatible",
     defaultBaseUrl: "https://api.openai.com/v1",
-    endpointHint: "将在地址后使用 /chat/completions，适用于兼容网关和本地服务。",
   },
   {
     kind: "anthropic",
     label: "Anthropic",
     defaultBaseUrl: "https://api.anthropic.com/v1",
-    endpointHint: "将在地址后使用 /messages，并使用 Anthropic 原生认证头。",
   },
 ];
 
@@ -209,9 +205,7 @@ onMounted(load);
   <section class="page-stack settings-page">
     <div class="section-heading">
       <div>
-        <p class="eyebrow">MODEL PROVIDERS</p>
         <h2>模型服务</h2>
-        <p>支持 OpenAI Responses、OpenAI Compatible 和 Anthropic 三种接口格式。密钥经加密后保存，且永不回传。</p>
       </div>
       <button class="button primary" type="button" @click="showForm ? closeForm() : beginCreate()">
         {{ showForm ? (isEditing ? "取消修改" : "收起表单") : "添加模型配置" }}
@@ -221,12 +215,9 @@ onMounted(load);
     <div v-if="error" class="alert error">{{ error }}</div>
     <div v-if="success" class="alert success">{{ success }}</div>
 
-    <section class="card setup-guide" aria-label="首次使用引导">
-      <h3>三步开始检查文章</h3>
-      <ol><li>添加配置：填写服务地址、密钥和模型名称。</li><li>测试连接：确认初检和复核都能正常返回。</li><li>分析示例：查看报告，练习原文定位和逐条审核。</li></ol>
-      <RouterLink v-if="readyProfileId" class="button primary compact" :to="`/analyses/new?example=1&profile=${readyProfileId}`">连接成功，分析示例文章 →</RouterLink>
-      <p v-else class="muted">保存后点击配置上的“测试连接”，成功后可直接分析示例。</p>
-    </section>
+    <div v-if="readyProfileId" class="hero-actions">
+      <RouterLink class="button primary compact" :to="`/analyses/new?example=1&profile=${readyProfileId}`">分析示例文章 →</RouterLink>
+    </div>
 
     <form v-if="showForm" class="card provider-form" @submit.prevent="save">
       <div class="form-section-title">
@@ -246,7 +237,6 @@ onMounted(load);
             type="url"
             :placeholder="activeProvider.defaultBaseUrl"
           />
-          <small class="field-hint">{{ activeProvider.endpointHint }}</small>
         </label>
         <label class="field full">
           <span>API 密钥</span>
@@ -255,7 +245,7 @@ onMounted(load);
             :required="!isEditing"
             type="password"
             autocomplete="new-password"
-            :placeholder="isEditing ? '留空则保留当前密钥；输入新值可替换' : '仅本次输入，保存后不可查看'"
+            :placeholder="isEditing ? '留空保留当前密钥' : '输入 API 密钥'"
           />
         </label>
         <label class="field">
@@ -264,7 +254,7 @@ onMounted(load);
         </label>
       </div>
       <details class="model-advanced" :open="isEditing">
-        <summary>高级选项（接口格式、独立复核模型、并发数）</summary>
+        <summary>高级选项</summary>
         <div class="form-grid">
         <label class="field">
           <span>接口格式</span>
@@ -289,7 +279,7 @@ onMounted(load);
       <label class="disclosure-check">
         <input v-model="form.disclosure_accepted" required type="checkbox" />
         <span>
-          我已了解：文章正文会发送给此第三方模型服务商，并应自行确认该服务商的数据处理政策。
+          我已了解并同意将文章正文发送给此模型服务商。
         </span>
       </label>
       <div class="form-actions">
@@ -344,15 +334,7 @@ onMounted(load);
     <div v-else class="empty-state card">
       <div class="empty-glyph">模</div>
       <h3>还没有模型配置</h3>
-      <p>添加任一种支持的模型服务，才能开始文章分析。</p>
       <button class="button primary" type="button" @click="beginCreate">添加配置</button>
-    </div>
-
-    <div class="security-strip">
-      <span>密钥保护</span>
-      <p>
-        密钥使用 XChaCha20-Poly1305 加密，主密钥仅从运行环境读取。日志不会记录密钥、正文或完整提示词。
-      </p>
     </div>
   </section>
 </template>

@@ -95,24 +95,20 @@ onBeforeUnmount(() => {
       <article class="stat-card featured">
         <span class="stat-label">全部分析</span>
         <strong>{{ result?.totals.total ?? "—" }}</strong>
-        <p>每一篇文章都保留独立的问题报告。</p>
       </article>
       <article class="stat-card">
         <span class="stat-label">正在处理</span>
         <strong>{{ result?.totals.active ?? "—" }}</strong>
-        <p>任务在后台运行，可以随时离开页面。</p>
       </article>
       <article class="stat-card">
         <span class="stat-label">已完成</span>
         <strong>{{ result?.totals.completed ?? "—" }}</strong>
-        <p>可导出 JSON、Markdown 与 PDF。</p>
       </article>
     </div>
 
     <div class="section-heading">
       <div>
         <h2>文章历史</h2>
-        <p>跟踪分析状态，回到任意一份问题报告。</p>
       </div>
       <div class="segmented" aria-label="筛选任务">
         <button
@@ -132,7 +128,6 @@ onBeforeUnmount(() => {
       <label class="field"><span class="sr-only">搜索文章名</span><input v-model="search" type="search" maxlength="100" placeholder="搜索文章名" /></label>
       <button class="button quiet compact" type="submit">搜索</button>
       <button class="text-button" type="button" @click="load()">刷新列表</button>
-      <span v-if="result?.totals.active" class="muted" role="status">处理中任务每 8 秒更新</span>
     </form>
 
     <div v-if="error" class="alert error" role="alert">
@@ -178,11 +173,9 @@ onBeforeUnmount(() => {
     <div v-else class="empty-state card">
       <div class="empty-glyph">文</div>
       <h3>{{ result?.totals.total === 0 ? "开始你的第一次文章检查" : "没有匹配的文章" }}</h3>
-      <p>上传 TXT、DOCX 或文字型 PDF，开始第一次文章检查。</p>
       <template v-if="result?.totals.total === 0">
-        <p>先连接模型并测试，再用一段示例正文熟悉报告。</p>
-        <RouterLink class="button quiet" to="/models">1. 连接模型</RouterLink>
-        <RouterLink class="button primary" to="/analyses/new?example=1">2. 分析示例文章</RouterLink>
+        <RouterLink class="button quiet" to="/models">连接模型</RouterLink>
+        <RouterLink class="button primary" to="/analyses/new?example=1">示例分析</RouterLink>
       </template>
     </div>
 

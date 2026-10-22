@@ -135,7 +135,7 @@ onBeforeUnmount(() => { monitor?.stop(); clearInterval(clock); window.removeEven
 <template>
   <section class="progress-page">
     <div v-if="error" class="alert error" role="alert">{{ error }} <button v-if="connection === 'stopped'" class="text-button" type="button" @click="connect">重新连接</button></div>
-    <div v-if="connection === 'reconnecting'" class="alert" role="status">连接中断，正在自动重连。后台任务会继续运行。</div>
+    <div v-if="connection === 'reconnecting'" class="alert" role="status">连接中断，正在自动重连</div>
     <div v-if="!job && !error" class="card loading-card">
       <span class="spinner" /> 正在读取任务…
     </div>
@@ -159,16 +159,13 @@ onBeforeUnmount(() => { monitor?.stop(); clearInterval(clock); window.removeEven
           </div>
         </div>
         <div class="progress-copy">
-          <p class="eyebrow">{{ terminal ? "ANALYSIS STATUS" : "ANALYSIS IN PROGRESS" }}</p>
           <h2>{{ statusCopy }}</h2>
           <p class="progress-timing">已耗时 {{ elapsed }}（含排队） · {{ lastUpdate }}</p>
           <p v-if="job.status === 'failed'" class="failure-message">
             {{ job.error_message ?? "模型服务或文档处理发生错误。" }}
           </p>
-          <p v-else-if="job.status === 'cancelled'">原文件与已提取正文已按策略清除。</p>
           <p v-else>
             已完成 {{ job.completed_chunks }} / {{ job.total_chunks || "—" }} 个文本块。
-            你可以离开此页面，任务会继续在后台运行。
           </p>
           <div class="hero-actions">
             <button
@@ -208,11 +205,6 @@ onBeforeUnmount(() => { monitor?.stop(); clearInterval(clock); window.removeEven
           </div>
           <div>
             <strong>{{ stage.label }}</strong>
-            <small v-if="stage.key === 'extracting'">读取格式并建立原文位置映射</small>
-            <small v-else-if="stage.key === 'analyzing'">以高召回策略寻找错字、标点与病句</small>
-            <small v-else-if="stage.key === 'verifying'">统一复核候选，降低正式问题误报</small>
-            <small v-else-if="stage.key === 'merging'">核对原文引用并移除重叠项</small>
-            <small v-else>输出 JSON、Markdown 与 PDF</small>
           </div>
           <span class="stage-state">
             {{

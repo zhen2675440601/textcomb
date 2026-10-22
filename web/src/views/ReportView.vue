@@ -377,7 +377,6 @@ onBeforeUnmount(() => { sourceRequestVersion += 1; window.removeEventListener("k
     <template v-else-if="report">
       <header class="report-header card">
         <div>
-          <p class="eyebrow">TEXTCOMB REPORT · {{ report.schema }}</p>
           <h2>{{ report.document.original_name }}</h2>
           <p>
             {{ report.document.char_count.toLocaleString("zh-CN") }} 字符 ·
@@ -439,7 +438,6 @@ onBeforeUnmount(() => { sourceRequestVersion += 1; window.removeEventListener("k
           <button class="button primary compact" type="button" :disabled="!nextPending" @click="reviewNext">下一个未审核</button>
         </div>
         <label class="check-row"><input v-model="autoAdvance" type="checkbox" />标记后自动跳到下一条</label>
-        <small class="muted">快捷键：J / K 上下条 · N 下个未审核 · 1 正确 / 2 错误 / 3 有争议</small>
       </section>
 
       <div class="report-workspace" :class="{ 'with-source': sourceOpen }">
@@ -598,21 +596,18 @@ onBeforeUnmount(() => { sourceRequestVersion += 1; window.removeEventListener("k
           <div v-if="!visibleIssues.length" class="empty-state card compact-empty">
             <div class="empty-glyph">筛</div>
             <h3>没有符合条件的问题</h3>
-            <p>调整左侧筛选条件，查看其他分析结果。</p>
           </div>
         </div>
 
         <aside v-if="sourceOpen" class="source-panel card">
           <header class="source-panel-header">
             <div>
-              <p class="eyebrow">ANALYSIS SOURCE</p>
               <h3>分析原文</h3>
             </div>
             <button class="icon-button" type="button" aria-label="收起原文" @click="toggleSource">
               ×
             </button>
           </header>
-          <p class="source-panel-note">显示用于定位问题的提取正文；DOCX 和 PDF 保留文字内容，不保留原始排版。</p>
           <div v-if="sourceLoading" class="inline-loading"><span class="spinner" /> 正在读取原文…</div>
           <div v-else-if="sourceError" class="source-unavailable">
             <strong>原文暂不可查看</strong>
@@ -646,8 +641,8 @@ onBeforeUnmount(() => { sourceRequestVersion += 1; window.removeEventListener("k
                     <option value="paragraph">分段</option>
                   </select>
                 </label>
-                <label class="field">说明
-                  <textarea v-model="missedNote" rows="3" maxlength="1000" placeholder="说明这里遗漏了什么问题" />
+                <label class="field">问题描述
+                  <textarea v-model="missedNote" rows="3" maxlength="1000" placeholder="问题描述" />
                 </label>
                 <button class="button primary compact" type="button" :disabled="savingMiss || !missedNote.trim()" @click="saveMissedIssue">保存漏检反馈</button>
               </div>
@@ -662,10 +657,6 @@ onBeforeUnmount(() => { sourceRequestVersion += 1; window.removeEventListener("k
           </div>
         </aside>
       </div>
-
-      <p class="report-disclaimer">
-        文梳提供辅助分析，不代替作者、编辑或专业审校人员的最终判断。
-      </p>
     </template>
   </section>
 </template>

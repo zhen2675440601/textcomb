@@ -133,20 +133,8 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
 </script>
 
 <template>
-  <section class="new-analysis-grid">
+  <section class="new-analysis-page">
     <div class="page-stack">
-      <div class="intro-copy">
-        <p class="eyebrow">NEW ANALYSIS</p>
-        <h2>把文章交给文梳检查</h2>
-        <p>原文件仅用于本次分析。成功、取消或主动删除后会立即清除。</p>
-      </div>
-
-      <div v-if="!loadingProfiles && !usableProfiles.length" class="card setup-guide">
-        <h3>先连接一个模型服务</h3>
-        <p>保存配置并测试连接后，就可以检查文章；也可以先填入示例，了解操作步骤。</p>
-        <RouterLink class="button primary compact" to="/models">连接模型并测试</RouterLink>
-      </div>
-
       <div v-if="error" class="alert error" role="alert">{{ error }}</div>
 
       <section class="card form-card">
@@ -154,7 +142,6 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
           <span>01</span>
           <div>
             <h3>添加文章</h3>
-            <p>上传文件，或直接粘贴正文；粘贴内容将按 TXT 文章处理。</p>
             <button class="text-button" type="button" :disabled="submitting" @click="fillExample">填入示例正文</button>
           </div>
         </div>
@@ -203,8 +190,8 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
           </template>
           <template v-else>
             <div class="upload-glyph">↑</div>
-            <strong>拖放文章到这里，或点击选择</strong>
-            <span>支持 TXT、DOCX、文字型 PDF；单文件不超过 20 MiB</span>
+            <strong>选择文件</strong>
+            <span>TXT / DOCX / PDF · ≤20 MiB</span>
           </template>
         </button>
 
@@ -215,7 +202,7 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
             v-model="pastedText"
             :aria-invalid="pastedTextTooLong"
             :disabled="submitting"
-            placeholder="把已写好的文章正文直接粘贴到这里。保留换行可帮助文梳识别段落。"
+            placeholder="粘贴文章正文"
             rows="12"
           />
           <div class="pasted-text-meta">
@@ -235,15 +222,14 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
           <span>02</span>
           <div>
             <h3>选择文章场景</h3>
-            <p>根据文章类型，减少公式、引用和数字被误报的情况。</p>
           </div>
         </div>
         <label class="field">
           <span>分析场景</span>
           <select v-model="analysisProfile">
             <option value="general">通用文章</option>
-            <option value="academic">学术论文（保护公式、引用和参考文献）</option>
-            <option value="financial">财报/商业报告（保护金额、表格和财务数字）</option>
+            <option value="academic">学术论文</option>
+            <option value="financial">财报/商业报告</option>
           </select>
         </label>
       </section>
@@ -253,7 +239,6 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
           <span>03</span>
           <div>
             <h3>选择分析模型</h3>
-            <p>模型会读取文章正文；请确认服务商的数据政策。</p>
           </div>
         </div>
 
@@ -279,7 +264,7 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
               </small>
             </span>
             <em :class="{ verified: profile.is_reference && analysisProfile === 'general' }">
-              {{ profile.is_reference && analysisProfile === "general" ? "参考配置（以报告为准）" : "未经验证" }}
+              {{ profile.is_reference && analysisProfile === "general" ? "参考配置" : "未经验证" }}
             </em>
           </label>
         </div>
@@ -287,6 +272,7 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
           <p>还没有可用的模型配置。</p>
           <RouterLink class="button quiet compact" to="/models">前往配置</RouterLink>
         </div>
+        <p v-if="selectedProfile" class="selected-provider">正文将发送至 {{ selectedProfile.base_url }}</p>
       </section>
 
       <div v-if="submitting" class="upload-progress-card">
@@ -311,22 +297,5 @@ onMounted(() => { if (route.query.example === "1") fillExample(); void loadProfi
         <span aria-hidden="true">→</span>
       </button>
     </div>
-
-    <aside class="expectation-card">
-      <p class="eyebrow">本次会检查</p>
-      <ul>
-        <li><span>字</span><div><strong>错字</strong><small>疑似错别字与不规范字</small></div></li>
-        <li><span>，</span><div><strong>标点</strong><small>用法、位置与全半角问题</small></div></li>
-        <li><span>句</span><div><strong>病句辅助</strong><small>先判断句子关系，再提示成分、搭配、语序与逻辑问题</small></div></li>
-        <li><span>¶</span><div><strong>分段建议</strong><small>主题变化未分段，仅作疑似提醒</small></div></li>
-      </ul>
-      <div class="privacy-note">
-        <strong>数据处理提醒</strong>
-        <p>正文会发送给所选模型服务商。文梳不会在日志中记录正文、问题片段或密钥。</p>
-      </div>
-      <p v-if="selectedProfile" class="selected-provider">
-        当前服务：{{ selectedProfile.base_url }}
-      </p>
-    </aside>
   </section>
 </template>
