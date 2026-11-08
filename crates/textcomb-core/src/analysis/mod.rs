@@ -319,11 +319,8 @@ fn overlaps_protected_span(
     let base = BASE_PROTECTED.get_or_init(|| {
         Regex::new(
             r#"(?x)
-            https?://[^\s]+ |
-            www\.[^\s]+ |
+            (?:[A-Za-z][A-Za-z0-9+.-]*://|www\.)[^\s<>"'`，。！？；：、（）【】［］《》“”‘’]+ |
             `[^`]+` |
-            \$[^$]+\$ |
-            [A-Za-z][A-Za-z0-9+.-]*://[^\s]+ |
             \\begin\{(?:equation|align\*?|math|displaymath)\}[\s\S]*?\\end\{(?:equation|align\*?|math|displaymath)\} |
             \\\([\s\S]*?\\\) |
             \\\[[\s\S]*?\\\]
@@ -332,54 +329,102 @@ fn overlaps_protected_span(
         .expect("base protected span regex is valid")
     });
     let academic = ACADEMIC_PROTECTED.get_or_init(|| {
-        Regex::new(
-            r#"(?x)
+        let author_year =
+            r"[\p{Han}A-Za-z][\p{Han}A-Za-z\x20.·&、-]{0,60}[,，][\t\x20]*(?:19|20)\d{2}[a-z]?";
+        let numeric_and_doi = r"(?x)
             (?i:10\.\d{4,9}/[-._;()/:A-Z0-9]+) |
-            \[\d{1,4}(?:\s*[-,，、]\s*\d{1,4})*\]
-        "#,
-        )
+            \[\d{1,4}(?:[\t\x20]*[-–—,，、][\t\x20]*\d{1,4})*\] |
+            ［\d{1,4}(?:[\t\x20]*[-–—,，、][\t\x20]*\d{1,4})*］";
+        Regex::new(&format!(
+            r"{numeric_and_doi} | \({author_year}\) | （{author_year}）"
+        ))
         .expect("academic protected span regex is valid")
     });
     let financial = FINANCIAL_PROTECTED.get_or_init(|| {
         Regex::new(
             r#"(?xi)
-            [¥￥$€£]\s*\d[\d,，]*(?:\.\d+)? |
-            \d[\d,，]*(?:\.\d+)?(?:%|‰|亿元|万元|人民币|美元|元|万|亿|股|人次) |
+            [¥￥$€£][\t\x20]*\d+(?:[,，]\d{3})*(?:\.\d+)? |
+            \d+(?:[,，]\d{3})*(?:\.\d+)?(?:%|％|‰|亿元|万元|人民币|美元|元|万|亿|股|人次) |
             \d{4}年(?:\d{1,2}月(?:\d{1,2}日)?)? |
+            (?-u:\b)[0-9]{4}-[0-9]{2}-[0-9]{2}(?-u:\b) |
             \d{6}\.(?:sh|sz|bj)
         "#,
         )
         .expect("financial protected span regex is valid")
     });
-    let matches = |regex: &Regex| {
+    let matches = |byte_start, byte_end| {
+        let match_start = text[..byte_start].chars().count();
+        let match_end = match_start + text[byte_start..byte_end].chars().count();
         if category == IssueCategory::Grammar {
-            regex_covers(regex, text, start, end)
+            match_start <= start && match_end >= end
         } else {
-            regex_overlaps(regex, text, start, end)
+            match_start < end && match_end > start
         }
     };
-    matches(base)
+    let matches_regex = |regex: &Regex| {
+        regex
+            .find_iter(text)
+            .any(|found| matches(found.start(), found.end()))
+    };
+    matches_regex(base)
+        || any_dollar_math_span(text, matches)
         || match analysis_profile {
             AnalysisProfile::General => false,
-            AnalysisProfile::Academic => matches(academic),
-            AnalysisProfile::Financial => matches(financial),
+            AnalysisProfile::Academic => matches_regex(academic),
+            AnalysisProfile::Financial => matches_regex(financial),
         }
 }
 
-fn regex_covers(regex: &Regex, text: &str, start: usize, end: usize) -> bool {
-    regex.find_iter(text).any(|found| {
-        let match_start = text[..found.start()].chars().count();
-        let match_end = match_start + found.as_str().chars().count();
-        match_start <= start && match_end >= end
-    })
-}
-
-fn regex_overlaps(regex: &Regex, text: &str, start: usize, end: usize) -> bool {
-    regex.find_iter(text).any(|found| {
-        let match_start = text[..found.start()].chars().count();
-        let match_end = match_start + found.as_str().chars().count();
-        match_start < end && match_end > start
-    })
+fn any_dollar_math_span(text: &str, matches: impl Fn(usize, usize) -> bool) -> bool {
+    static AMOUNT_FOLLOWED_BY_PROSE: OnceLock<Regex> = OnceLock::new();
+    let amount_followed_by_prose = AMOUNT_FOLLOWED_BY_PROSE.get_or_init(|| {
+        Regex::new(r"^\d[\d.,]*[ \t]*\p{Han}").expect("amount followed by prose regex is valid")
+    });
+    let mut delimiters = text
+        .match_indices('$')
+        .filter_map(|(index, _)| {
+            let escapes = text[..index]
+                .bytes()
+                .rev()
+                .take_while(|&b| b == b'\\')
+                .count();
+            (escapes % 2 == 0).then_some(index)
+        })
+        .peekable();
+    let mut opening = None;
+    while let Some(index) = delimiters.next() {
+        let width = if delimiters.peek() == Some(&(index + 1)) {
+            delimiters.next();
+            2
+        } else {
+            1
+        };
+        if let Some((begin, opening_width)) = opening
+            && width == opening_width
+        {
+            let body = &text[begin + opening_width..index];
+            // Currency symbols must not pair across prose. Inline math uses
+            // adjacent non-space delimiters, and a closing dollar cannot prefix
+            // another amount. An invalid pair must not consume a later formula.
+            let valid_body = !body.trim().is_empty()
+                && (width == 2
+                    || (body.trim() == body
+                        && !body.contains(['\r', '\n', '`', '，', '。', '！', '？', '；'])
+                        && !amount_followed_by_prose.is_match(body)));
+            let prefixes_amount = width == 1
+                && text[index + width..]
+                    .starts_with(|c: char| c.is_ascii_digit() || matches!(c, '０'..='９'));
+            if valid_body && !prefixes_amount {
+                if matches(begin, index + width) {
+                    return true;
+                }
+                opening = None;
+                continue;
+            }
+        }
+        opening = Some((index, width));
+    }
+    false
 }
 
 pub fn finalize_issues(
@@ -744,6 +789,195 @@ mod tests {
             5,
             AnalysisProfile::Financial,
             IssueCategory::Typo
+        ));
+    }
+
+    #[test]
+    fn adjacent_currency_and_urls_do_not_downgrade_verified_prose() {
+        for text in [
+            "预算为$100，准备工作非常充份，实际支出为$200。",
+            "预算为$100准备工作非常充份实际支出为$200。",
+            "预算为$100准备工作非常充份公式$x+y$。",
+            "预算为$100\n准备工作非常充份\n实际支出为$200。",
+            "详情见https://example.com，准备工作非常充份。",
+            "详情见www.example.com。准备工作非常充份。",
+            "详情见ftp://example.com/file；准备工作非常充份。",
+            "详情见“https://example.com/中文路径”，准备工作非常充份。",
+        ] {
+            for profile in [
+                AnalysisProfile::General,
+                AnalysisProfile::Academic,
+                AnalysisProfile::Financial,
+            ] {
+                let (document, resolved, verdicts) = literal_fixture(
+                    text,
+                    "工作非常充份",
+                    &["工作非常充分"],
+                    IssueCategory::Typo,
+                    profile,
+                );
+                assert!(!resolved[0].protected, "{profile:?}: {text}");
+                let issues =
+                    finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+                        .expect("verified prose beside a protected fragment");
+                assert_eq!(
+                    issues[0].level,
+                    IssueLevel::Confirmed,
+                    "{profile:?}: {text}"
+                );
+                assert_eq!(issues[0].original_text, "份");
+                let offset = text[..text.find('份').expect("typo")].chars().count() as u32;
+                assert_eq!(issues[0].location.char_start, offset);
+                assert_eq!(issues[0].location.char_end, offset + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn dollar_math_and_url_contents_remain_protected() {
+        for (text, quote) in [
+            ("公式$x^2 + y^2$，后面是正文。", "x^2 + y^2"),
+            ("常数$100$。", "100"),
+            ("预算$100，另有公式$x+y$。", "x+y"),
+            ("预算$100另有公式$x+y$。", "x+y"),
+            ("预算$100 and $200 then $x+y$。", "x+y"),
+            ("公式$$\nx+y\n$$。", "x+y"),
+            (r"公式$\text{价格}\$100 + x$。", r"\text{价格}\$100 + x"),
+            (
+                "网址https://example.com/中文路径?q=1&b=2#part，正文。",
+                "中文路径",
+            ),
+            ("网址www.example.com/a，正文。", "example"),
+            ("地址ftp://example.com/a，正文。", "example"),
+            ("代码`value = 100`，正文。", "value = 100"),
+        ] {
+            let start = locate_unique(text, quote, None, None).expect("unique fragment");
+            for category in [
+                IssueCategory::Typo,
+                IssueCategory::Punctuation,
+                IssueCategory::Grammar,
+            ] {
+                assert!(
+                    overlaps_protected_span(
+                        text,
+                        start,
+                        start + quote.chars().count(),
+                        AnalysisProfile::General,
+                        category
+                    ),
+                    "{category:?}: {text}"
+                );
+            }
+        }
+        for text in [
+            r"预算\$100，支出\$200。",
+            "价格$100至$200。",
+            "价格$１００至$２００。",
+            "$没有闭合",
+        ] {
+            assert!(!any_dollar_math_span(text, |_, _| true), "{text}");
+        }
+    }
+
+    #[test]
+    fn protected_amount_excludes_following_chinese_punctuation() {
+        let text = "预算为$1，234.50，，项目已启动。";
+        for (quote, expected) in [("$1，234.50", true), ("，，", false)] {
+            let start = locate_unique(text, quote, None, None).expect("unique fragment");
+            assert_eq!(
+                overlaps_protected_span(
+                    text,
+                    start,
+                    start + quote.chars().count(),
+                    AnalysisProfile::Financial,
+                    IssueCategory::Punctuation
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn scene_variants_are_suspected_only_in_their_own_profile() {
+        for (text, quote, protected_profile) in [
+            (
+                "🧪参见［12］，准备充份。",
+                "［12］",
+                AnalysisProfile::Academic,
+            ),
+            (
+                "参见［12–14， 16］。",
+                "［12–14， 16］",
+                AnalysisProfile::Academic,
+            ),
+            (
+                "已有研究（张某，2024）提出观点。",
+                "（张某，2024）",
+                AnalysisProfile::Academic,
+            ),
+            (
+                "已有研究(Smith et al., 2024a)提出观点。",
+                "(Smith et al., 2024a)",
+                AnalysisProfile::Academic,
+            ),
+            (
+                "截至2026-10-22，收入增长。",
+                "2026-10-22",
+                AnalysisProfile::Financial,
+            ),
+            (
+                "增长率为12.5％，收入增长。",
+                "12.5％",
+                AnalysisProfile::Financial,
+            ),
+        ] {
+            for profile in [
+                AnalysisProfile::General,
+                AnalysisProfile::Academic,
+                AnalysisProfile::Financial,
+            ] {
+                for category in [
+                    IssueCategory::Typo,
+                    IssueCategory::Punctuation,
+                    IssueCategory::Grammar,
+                ] {
+                    let (document, resolved, verdicts) =
+                        literal_fixture(text, quote, &["请人工复核此片段"], category, profile);
+                    let expected = if profile == protected_profile {
+                        IssueLevel::Suspected
+                    } else {
+                        IssueLevel::Confirmed
+                    };
+                    let issues =
+                        finalize_issues(&document, resolved, verdicts, &HashMap::new(), 80, 50)
+                            .expect("scene fragment report");
+                    assert_eq!(
+                        issues[0].level, expected,
+                        "{profile:?}/{category:?}: {text}"
+                    );
+                    assert_eq!(issues[0].location.quote, quote);
+                }
+            }
+            assert!(!overlaps_protected_span(
+                text,
+                0,
+                text.chars().count(),
+                protected_profile,
+                IssueCategory::Grammar
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_citation_brackets_do_not_protect_punctuation() {
+        let text = "已有研究（张某，2024)提出观点。";
+        let start = locate_unique(text, ")", None, None).expect("unique bracket");
+        assert!(!overlaps_protected_span(
+            text,
+            start,
+            start + 1,
+            AnalysisProfile::Academic,
+            IssueCategory::Punctuation,
         ));
     }
 
