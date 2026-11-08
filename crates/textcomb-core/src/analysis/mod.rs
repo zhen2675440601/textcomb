@@ -329,14 +329,15 @@ fn overlaps_protected_span(
         .expect("base protected span regex is valid")
     });
     let academic = ACADEMIC_PROTECTED.get_or_init(|| {
-        Regex::new(
-            r#"(?x)
+        let author_year =
+            r"[\p{Han}A-Za-z][\p{Han}A-Za-z\x20.·&、-]{0,60}[,，][\t\x20]*(?:19|20)\d{2}[a-z]?";
+        let numeric_and_doi = r"(?x)
             (?i:10\.\d{4,9}/[-._;()/:A-Z0-9]+) |
             \[\d{1,4}(?:[\t\x20]*[-–—,，、][\t\x20]*\d{1,4})*\] |
-            ［\d{1,4}(?:[\t\x20]*[-–—,，、][\t\x20]*\d{1,4})*］ |
-            [（(][\p{Han}A-Za-z][\p{Han}A-Za-z\x20.·&、-]{0,60}[,，][\t\x20]*(?:19|20)\d{2}[a-z]?[）)]
-        "#,
-        )
+            ［\d{1,4}(?:[\t\x20]*[-–—,，、][\t\x20]*\d{1,4})*］";
+        Regex::new(&format!(
+            r"{numeric_and_doi} | \({author_year}\) | （{author_year}）"
+        ))
         .expect("academic protected span regex is valid")
     });
     let financial = FINANCIAL_PROTECTED.get_or_init(|| {
@@ -376,6 +377,9 @@ fn overlaps_protected_span(
 
 fn any_dollar_math_span(text: &str, matches: impl Fn(usize, usize) -> bool) -> bool {
     static AMOUNT_FOLLOWED_BY_PROSE: OnceLock<Regex> = OnceLock::new();
+    let amount_followed_by_prose = AMOUNT_FOLLOWED_BY_PROSE.get_or_init(|| {
+        Regex::new(r"^\d[\d.,]*[ \t]*\p{Han}").expect("amount followed by prose regex is valid")
+    });
     let mut delimiters = text
         .match_indices('$')
         .filter_map(|(index, _)| {
@@ -406,12 +410,7 @@ fn any_dollar_math_span(text: &str, matches: impl Fn(usize, usize) -> bool) -> b
                 && (width == 2
                     || (body.trim() == body
                         && !body.contains(['\r', '\n', '`', '，', '。', '！', '？', '；'])
-                        && !AMOUNT_FOLLOWED_BY_PROSE
-                            .get_or_init(|| {
-                                Regex::new(r"^\d[\d.,]*[ \t]*\p{Han}")
-                                    .expect("amount followed by prose regex is valid")
-                            })
-                            .is_match(body)));
+                        && !amount_followed_by_prose.is_match(body)));
             let prefixes_amount = width == 1
                 && text[index + width..]
                     .starts_with(|c: char| c.is_ascii_digit() || matches!(c, '０'..='９'));
@@ -967,6 +966,19 @@ mod tests {
                 IssueCategory::Grammar
             ));
         }
+    }
+
+    #[test]
+    fn malformed_citation_brackets_do_not_protect_punctuation() {
+        let text = "已有研究（张某，2024)提出观点。";
+        let start = locate_unique(text, ")", None, None).expect("unique bracket");
+        assert!(!overlaps_protected_span(
+            text,
+            start,
+            start + 1,
+            AnalysisProfile::Academic,
+            IssueCategory::Punctuation,
+        ));
     }
 
     #[test]
