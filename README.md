@@ -24,11 +24,17 @@
 
 ## 快速启动
 
-需要 Docker Compose。首次启动前，在项目根目录复制 `.env.compose.example` 为 `.env`，修改数据库密码并生成 32 字节 Base64 主密钥。具体生成方式见 [`docs/development.md`](docs/development.md)。
+需要 Docker Compose。首次启动前，在项目根目录复制 `.env.compose.example` 为 `.env`，修改数据库密码、生成 32 字节 Base64 主密钥，并设置管理员账号：
+
+```dotenv
+TEXTCOMB_ADMIN_USERNAME=admin
+TEXTCOMB_ADMIN_PASSWORD=填写你自己的至少12个字符的密码
+```
+
+然后启动，空数据库会自动创建该管理员，无需另外执行创建账号命令。已有用户时不会新增或重置账号；密码留空则跳过自动初始化。主密钥生成方式见 [`docs/development.md`](docs/development.md)。
 
 ```shell
 docker compose up -d --build
-docker compose --profile tools run --rm cli bootstrap-admin --username admin --password '请替换为至少十二个字符的密码'
 ```
 
 打开 `http://localhost:3000` 登录。若在 `.env` 中修改了 `TEXTCOMB_HTTP_PORT`，请使用对应端口。首个超管可创建后续用户；登录后到模型设置中添加并测试模型配置，再新建分析。

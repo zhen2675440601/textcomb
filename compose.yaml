@@ -36,7 +36,10 @@ services:
       context: .
       target: cli
     command: ["migrate"]
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      TEXTCOMB_ADMIN_USERNAME: ${TEXTCOMB_ADMIN_USERNAME:-admin}
+      TEXTCOMB_ADMIN_PASSWORD: ${TEXTCOMB_ADMIN_PASSWORD:-}
     depends_on:
       postgres:
         condition: service_healthy

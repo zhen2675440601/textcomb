@@ -8,7 +8,6 @@
 
 ```shell
 cp .env.compose.example .env
-docker compose up -d --build
 ```
 
 Windows PowerShell 可用以下命令生成主密钥；输出值写入 `.env` 的 `TEXTCOMB_MASTER_KEY_BASE64`：
@@ -21,7 +20,22 @@ $rng.Dispose()
 [Convert]::ToBase64String($key)
 ```
 
-数据库迁移由一次性 `migrate` 容器先执行。首次创建超管：
+数据库迁移由一次性 `migrate` 容器先执行。启动前在 `.env` 中配置管理员，空数据库会自动创建：
+
+```dotenv
+TEXTCOMB_ADMIN_USERNAME=admin
+TEXTCOMB_ADMIN_PASSWORD=填写你自己的至少12个字符的密码
+```
+
+配置好数据库密码、主密钥和上述管理员变量后启动：
+
+```shell
+docker compose up -d --build
+```
+
+启动后直接用上述账号密码登录。已有用户时忽略初始化变量，不会修改账号、密码或会话。密码留空则跳过自动初始化；用户名默认 `admin`。初始化配置只传入一次性 `migrate` 容器，不传入 API 或 Worker。更改这两个变量不能重置已有密码。
+
+也可以保留手动创建超管的方式（仅限用户表为空）：
 
 ```shell
 docker compose --profile tools run --rm cli bootstrap-admin --username admin --password '至少十二个字符的密码'

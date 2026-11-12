@@ -13,8 +13,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Run all database migrations.
-    Migrate,
+    /// Run migrations and optionally initialize an administrator on an empty database.
+    Migrate {
+        #[arg(long, env = "TEXTCOMB_ADMIN_USERNAME", default_value = "admin")]
+        admin_username: String,
+        #[arg(long, env = "TEXTCOMB_ADMIN_PASSWORD", hide_env_values = true)]
+        admin_password: Option<String>,
+    },
     /// Create the first super administrator. Only works on an empty user table.
     BootstrapAdmin {
         #[arg(long)]
@@ -47,9 +52,33 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::from_env()?;
     let pool = db::connect(&config.database_url).await?;
     match cli.command {
-        Commands::Migrate => {
+        Commands::Migrate {
+            admin_username,
+            admin_password,
+        } => {
             db::migrate(&pool).await?;
             println!("Database migrations completed.");
+            if let Some(password) = admin_password.filter(|value| !value.is_empty()) {
+                match auth::bootstrap_admin_if_empty(
+                    &pool,
+                    &admin_username,
+                    &SecretString::from(password),
+                )
+                .await?
+                {
+                    Some(user) => println!(
+                        "Created super administrator {} ({})",
+                        user.username, user.id
+                    ),
+                    None => {
+                        println!("Existing users preserved; administrator initialization skipped.")
+                    }
+                }
+            } else {
+                println!(
+                    "Administrator initialization skipped: TEXTCOMB_ADMIN_PASSWORD is not set."
+                );
+            }
         }
         Commands::BootstrapAdmin { username, password } => {
             db::migrate(&pool).await?;
