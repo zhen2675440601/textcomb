@@ -110,6 +110,8 @@ jobs:
           test "$count" -eq 3
       - name: Verify embedded migration compatibility and history validation
         run: cargo test --locked -p textcomb-core migrations::tests
+      - name: Verify first-start administrator initialization
+        run: cargo test --locked -p textcomb-core auth::bootstrap_tests
       - name: Verify input retention against PostgreSQL
         run: cargo test --locked -p textcomb-core cleanup_tests
       - name: Verify concurrent analysis creation against PostgreSQL
