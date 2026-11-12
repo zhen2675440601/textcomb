@@ -39,6 +39,8 @@ docker compose up -d --build
 
 打开 `http://localhost:3000` 登录。若在 `.env` 中修改了 `TEXTCOMB_HTTP_PORT`，请使用对应端口。首个超管可创建后续用户；登录后到模型设置中添加并测试模型配置，再新建分析。
 
+默认自动识别同源访问，通过服务器 IP、自定义端口或 HTTPS 反向代理访问时，无需填写 `TEXTCOMB_PUBLIC_ORIGIN`。从旧版升级时，请删除 `.env` 中原有的 `TEXTCOMB_PUBLIC_ORIGIN=http://localhost:3000` 或将其留空；更新镜像后，执行 `docker compose up -d --no-deps --force-recreate api` 加载新配置。只有需要固定允许的站点或独立部署前端时才显式设置，详见[部署与运维](docs/operations.md)。
+
 不要把 `.env`、主密钥或模型密钥提交到仓库。有关开发环境、前后端启动和常见问题，请看 [`docs/development.md`](docs/development.md)。
 
 ## 技术概览

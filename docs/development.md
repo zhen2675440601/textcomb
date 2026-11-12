@@ -85,7 +85,7 @@ npm run generate:api
 
 生成命令默认读取 3000 端口；若使用其他端口，可直接运行 `npx openapi-typescript http://localhost:<端口>/api/openapi.json -o src/api/schema.d.ts`。生成结果是 `web/src/api/schema.d.ts`。CI 会在可部署容器栈上重新生成并检查差异，接口有变化时必须一并提交该文件。
 
-开发服务器默认将 `/api` 代理到 `http://localhost:3000`。容器化开发建议直接使用 Caddy 暴露的 `TEXTCOMB_HTTP_PORT`；未修改 `.env` 时默认是 3000。若该端口已被占用，可把 `.env` 中的 `TEXTCOMB_HTTP_PORT` 改为例如 `18080`，并同步把 `TEXTCOMB_PUBLIC_ORIGIN` 改为 `http://localhost:18080` 后重新执行 `docker compose up -d --build`。
+开发服务器默认将 `/api` 代理到 `http://localhost:3000`，保留浏览器的 Host。容器化开发建议直接使用 Caddy 暴露的 `TEXTCOMB_HTTP_PORT`；未修改 `.env` 时默认是 3000。若该端口已被占用，可把 `.env` 中的 `TEXTCOMB_HTTP_PORT` 改为例如 `18080` 后执行 `docker compose up -d`；无需另外配置站点地址。`TEXTCOMB_PUBLIC_ORIGIN` 未设置或留空时自动检查同源访问；旧 `.env` 中的 localhost 设置需要删除或留空，并重新创建 API 容器，单纯 restart 不加载新的环境变量。
 
 ## 确定性假模型
 
@@ -111,7 +111,7 @@ npm run test:e2e
 
 容器 CI 另在独立数据库和假模型上运行真实链路：登录、模型连接测试、提交正文、生成报告、原文定位、审核反馈和 JSON/Markdown/PDF 下载。CI 创建专用 `e2e-admin` 测试账号。手工重跑请使用独立测试 Compose 项目和端口，设置 `TEXTCOMB_E2E_BASE_URL`、`TEXTCOMB_E2E_LIVE=1`，以及该测试环境的 `TEXTCOMB_E2E_USERNAME` / `TEXTCOMB_E2E_PASSWORD`。假模型地址默认为 `http://fake-model:4010/v1`，可用 `TEXTCOMB_E2E_FAKE_MODEL_URL` 覆盖；运行 `npm run test:e2e -- --grep 'real fake-model'`。不要将这些测试账号或配置写入真实用户环境。
 
-本机前端代理可通过 `TEXTCOMB_API_ORIGIN` 指向测试后端，默认为 `http://localhost:3000`。后端的 `TEXTCOMB_PUBLIC_ORIGIN` 需与浏览器实际访问的源一致。上述工程测试不计算语言质量；参考配置仍须执行 `evaluation-preparation.md` 中的独立人工标注与两轮验收。
+本机前端代理可通过 `TEXTCOMB_API_ORIGIN` 指向测试后端，默认为 `http://localhost:3000`。通常让 `TEXTCOMB_PUBLIC_ORIGIN` 留空即可；显式填写时会严格限制允许的浏览器来源，协议、主机和端口须与前端一致。上述工程测试不计算语言质量；参考配置仍须执行 `evaluation-preparation.md` 中的独立人工标注与两轮验收。
 
 ## 历史与审核交互契约
 

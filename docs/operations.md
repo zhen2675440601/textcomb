@@ -2,12 +2,20 @@
 
 ## 上线前
 
-- 将 `TEXTCOMB_PUBLIC_ORIGIN` 设为唯一 HTTPS 站点源，例如 `https://textcomb.example.com`，不得带路径。
+- 默认让 `TEXTCOMB_PUBLIC_ORIGIN` 留空，前后端一起部署时自动识别同源访问。需要固定允许的站点或独立部署前端时才填写，例如 `https://textcomb.example.com`，不得带路径；显式配置始终优先，不会自动放行其他地址。
 - 将 `TEXTCOMB_SECURE_COOKIES` 设为 `true`。
 - 使用密码管理系统保存 PostgreSQL 密码和 32 字节主密钥；不得提交 `.env`。
 - 主密钥丢失后模型密钥无法恢复。轮换主密钥需要先实现逐条重加密流程，不能直接替换。
 - 只开放 Caddy 端口。PostgreSQL、API、Worker 和假模型不得直接暴露到互联网。
 - 为宿主机、容器镜像、TLS、数据库备份和安全更新建立责任人。
+
+## 自动识别站点与反向代理
+
+自动模式使用浏览器的 `Sec-Fetch-Site: same-origin` 识别同源请求，因此支持 HTTPS 终止和内部 Host 改写。其他子域发来的 `same-site` 请求也会被拦截；不会自动开放带凭证的跨域访问。
+
+没有该浏览器元数据时（例如通过 HTTP IP 访问），后端会按 Origin（缺少时检查 Referer）与请求的 Host/URI、传输协议核对。反向代理应保留原始 Host 和浏览器元数据；Vite 开发代理已保留 Host。不会使用客户端提供的 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto` 推断可信站点。如果旧客户端不发送元数据且代理终止 HTTPS 或改写 Host，可显式设置 `TEXTCOMB_PUBLIC_ORIGIN` 指定允许来源，无需放宽安全检查。没有 Origin、Referer 或跨站元数据的命令行请求仍可使用 API，认证与权限校验保持有效。
+
+升级时，如果旧 `.env` 里还保留 `TEXTCOMB_PUBLIC_ORIGIN=http://localhost:3000`，请删除该行或留空以启用自动模式。更新镜像后执行 `docker compose up -d --no-deps --force-recreate api` 加载新环境；仅修改这项配置不需要重新构建镜像或安装依赖，`docker compose restart` 不会加载新环境。如果使用额外的 Compose 或环境文件，请沿用原来的参数。
 
 ## 健康与指标
 
