@@ -132,7 +132,6 @@ jobs:
     env:
       TEXTCOMB_POSTGRES_PASSWORD: textcomb-container-ci
       TEXTCOMB_MASTER_KEY_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      TEXTCOMB_PUBLIC_ORIGIN: http://localhost:3000
       TEXTCOMB_SECURE_COOKIES: "false"
     steps:
       - uses: actions/checkout@v4
@@ -176,6 +175,8 @@ jobs:
           npm --prefix web ci --ignore-scripts
           npm --prefix web run generate:api
           git diff --exit-code -- web/src/api/schema.d.ts
+      - name: Verify automatic same-origin policy through the proxy
+        run: python3 -B tools/check-origin-policy.py
       - name: Browser end-to-end flow against the real fake-model stack
         env:
           TEXTCOMB_E2E_BASE_URL: http://localhost:3000

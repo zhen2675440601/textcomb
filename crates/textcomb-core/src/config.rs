@@ -15,7 +15,7 @@ use url::Url;
 pub struct AppConfig {
     pub database_url: String,
     pub bind: SocketAddr,
-    pub public_origin: Url,
+    pub public_origin: Option<Url>,
     pub storage_dir: PathBuf,
     pub master_key: [u8; 32],
     pub session_ttl: Duration,
@@ -32,25 +32,7 @@ impl AppConfig {
     pub fn from_env() -> CoreResult<Self> {
         let database_url = required("TEXTCOMB_DATABASE_URL")?;
         let bind = parse("TEXTCOMB_BIND", "0.0.0.0:8080")?;
-        let public_origin = Url::parse(&value("TEXTCOMB_PUBLIC_ORIGIN", "http://localhost:3000"))
-            .map_err(|_| {
-            CoreError::public(
-                ErrorCode::ConfigurationInvalid,
-                "TEXTCOMB_PUBLIC_ORIGIN 不是有效 URL",
-            )
-        })?;
-        if !matches!(public_origin.scheme(), "http" | "https")
-            || !public_origin.username().is_empty()
-            || public_origin.password().is_some()
-            || public_origin.path() != "/"
-            || public_origin.query().is_some()
-            || public_origin.fragment().is_some()
-        {
-            return Err(CoreError::public(
-                ErrorCode::ConfigurationInvalid,
-                "TEXTCOMB_PUBLIC_ORIGIN 必须是仅包含协议、主机和端口的 http/https 地址",
-            ));
-        }
+        let public_origin = parse_public_origin(&value("TEXTCOMB_PUBLIC_ORIGIN", ""))?;
         let storage_dir = PathBuf::from(value("TEXTCOMB_STORAGE_DIR", "./data"));
         let master_key = decode_master_key(&required("TEXTCOMB_MASTER_KEY_BASE64")?)?;
         let session_ttl = Duration::from_secs(
@@ -123,6 +105,33 @@ impl AppConfig {
     }
 }
 
+fn parse_public_origin(value: &str) -> CoreResult<Option<Url>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let origin = Url::parse(value).map_err(|_| {
+        CoreError::public(
+            ErrorCode::ConfigurationInvalid,
+            "TEXTCOMB_PUBLIC_ORIGIN 不是有效 URL",
+        )
+    })?;
+    if !matches!(origin.scheme(), "http" | "https")
+        || origin.host_str().is_none()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
+        return Err(CoreError::public(
+            ErrorCode::ConfigurationInvalid,
+            "TEXTCOMB_PUBLIC_ORIGIN 必须是仅包含协议、主机和端口的 http/https 地址",
+        ));
+    }
+    Ok(Some(origin))
+}
+
 fn value(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_owned())
 }
@@ -146,4 +155,34 @@ where
             format!("环境变量 {name} 的值无效"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_origin_is_optional_but_explicit_values_are_validated() {
+        for value in ["", "  \t"] {
+            assert!(parse_public_origin(value).unwrap().is_none());
+        }
+        for value in [
+            "http://192.0.2.10:18080",
+            "https://textcomb.example/",
+            "http://[::1]:3000",
+        ] {
+            assert!(parse_public_origin(value).unwrap().is_some());
+        }
+        for value in [
+            "null",
+            "*",
+            "ftp://example.com",
+            "https://user:password@example.com",
+            "https://example.com/login",
+            "https://example.com?query=1",
+            "https://example.com#fragment",
+        ] {
+            assert!(parse_public_origin(value).is_err(), "{value}");
+        }
+    }
 }
